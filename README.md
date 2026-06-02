@@ -9,7 +9,7 @@
 
 ---
 
-## 1. The pitch in one paragraph
+## 1. The idea
 
 Sophisticated investors price firms using a far richer information set than the handful of
 accounting ratios and GICS labels analysts typically rely on. The Asset Embeddings paper
@@ -71,7 +71,7 @@ with both generalist and specialist investors is visible (a healthcare name held
 dedicated biotech funds is very different from one held by broad large-cap value funds — that
 contrast is signal). We then *extract* the embeddings for the Health Care sub-universe and run
 the relative-value step within it. Training on Health Care alone is a viable alternative but
-leaves a thin per-quarter corpus (~200 names), so the full-market-then-extract route is the
+leaves a thin per-quarter corpus, so the full-market-then-extract route is the
 baseline.
 
 ### 3.2 Ownership sequences
@@ -113,53 +113,7 @@ held by similar investor clienteles.
 
 ---
 
-## 4. From embeddings to the portfolio
-
-### 4.1 The relative-value signal
-
-**Step 1 — valuation measure.** In each quarter, within Health Care, regress log market equity
-on log book equity:
-
-$$ p_{a} = \gamma\, b_{a} + \alpha + p_{a}^{\perp} $$
-
-The residual $p_a^{\perp}$ is our valuation measure — a generalization of market-to-book that
-strips out the mechanical book-equity component.
-
-**Step 2 — embedding-implied fair value.** Regress the valuation residual on the OS-BERT asset
-embeddings (standardized, ridge penalty by 10-fold cross-validation):
-
-$$ p_{a}^{\perp} = \beta' x_{a} + \delta + \varepsilon_{a} $$
-
-The fitted value $\hat p_a^{\perp} = \hat\beta' x_a + \hat\delta$ is what the firm's valuation
-*should* be, given how investors value its embedding peers.
-
-**Step 3 — mispricing.** The signal is the regression residual:
-
-$$ \text{signal}_a = p_a^{\perp} - \hat p_a^{\perp} $$
-
-- $\text{signal}_a < 0$ → priced **cheap** relative to peers → **LONG**
-- $\text{signal}_a > 0$ → priced **rich** relative to peers → **SHORT**
-
-### 4.2 Portfolio construction
-
-- Rank Health Care firms by the mispricing signal each quarter.
-- **Long** the cheapest tercile/decile, **short** the richest, **dollar-neutral** (equal long
-  and short notional).
-- Because the universe is a single sector, the book is naturally a within-sector relative-value
-  trade; optionally neutralize residual beta and sub-industry tilts.
-- **Rebalance quarterly**, in step with holdings disclosure, with an implementation lag that
-  respects 13F/fund reporting delays (see risks).
-- Weighting: equal-weight as the baseline, signal-weighted as a variant.
-
-### 4.3 Optional enhancement — supervised fine-tuning
-
-The paper notes OS-BERT may gain from fine-tuning toward the valuation target. As an
-extension we can fine-tune the embeddings (or the ridge stage) directly on the relative-value
-objective rather than using the purely unsupervised embeddings.
-
----
-
-## 5. Pipeline
+## Pipeline
 
 ```
 WRDS / FactSet Ownership (13F + Fund)
@@ -181,88 +135,7 @@ WRDS / FactSet Ownership (13F + Fund)
   pitch/                     ── slides, charts, and exhibits for the WUTIS presentation
 ```
 
-## 6. Repository layout
-
-```
-.
-├── data_cleaning.R          # WRDS FactSet Ownership → quarterly HC ownership sequences
-├── os_bert_training.py      # OS-BERT: per-quarter asset embeddings (asset = sentence)
-├── relative_value.py        # valuation residual + ridge fair value + mispricing signal
-├── backtest.py              # long–short portfolio, rebalancing, performance & risk
-├── pitch/                   # WUTIS deck and exhibits
-├── data/                    # ownership sequences (one parquet per quarter)
-├── embeddings/              # asset embeddings (one parquet per quarter)
-├── models/                  # per-quarter OS-BERT checkpoints
-├── signals/                 # per-quarter mispricing signals
-├── results/                 # backtest output
-├── .Renviron                # WRDS_USER / WRDS_PASSWORD (gitignored)
-└── README.md
-```
-
-## 7. Key parameters
-
-| Parameter | Value | Where |
-|---|---|---|
-| Sector universe | GICS Health Care (35), US | `data_cleaning.R` |
-| Sample period | 2005-Q1 … latest | `data_cleaning.R` |
-| Min investors per stock | 20 | `data_cleaning.R` |
-| Min stocks per investor | 20 | `data_cleaning.R` |
-| Max single-holding weight | 75% | `data_cleaning.R` |
-| Embedding dimension | 64–128 | `os_bert_training.py` |
-| OS-BERT layers / heads / context | 4 / 2 / 62 | `os_bert_training.py` |
-| Masking rate | 15% (80/10/10) | `os_bert_training.py` |
-| Valuation measure | residual of log ME on log BE | `relative_value.py` |
-| Fair-value model | ridge on embeddings, 10-fold CV | `relative_value.py` |
-| Rebalance frequency | quarterly | `backtest.py` |
-| Book structure | dollar-neutral long–short | `backtest.py` |
-
-## 8. Reproducing
-
-**Requirements**
-
-- **R:** `tidyverse`, `lubridate`, `dbplyr`, `RPostgres`, `arrow`
-- **Python ≥ 3.10:** `torch`, `transformers`, `pandas`, `pyarrow`, `numpy`, `scikit-learn`
-- WRDS credentials in `.Renviron`:
-  ```
-  WRDS_USER=...
-  WRDS_PASSWORD=...
-  ```
-
-**Run**
-
-```bash
-# 1. Build quarterly Health Care ownership sequences (pulls from WRDS)
-Rscript data_cleaning.R
-
-# 2. Train OS-BERT and extract asset embeddings (one model per quarter)
-python os_bert_training.py
-
-# 3. Build the relative-value mispricing signal
-python relative_value.py
-
-# 4. Backtest the long–short book
-python backtest.py
-```
-
-## 9. Risks & caveats
-
-- **Reporting lag / look-ahead.** 13F filings arrive up to 45 days after quarter-end and funds
-  report on varied schedules; the backtest must lag entry to when holdings were actually
-  observable. No firm enters the signal before its ownership data is public.
-- **Cross-sectional, not time-series.** Per-quarter embeddings are identified only up to
-  rotation, so the signal compares firms *within* a quarter — it is not a level that can be
-  tracked across quarters without alignment.
-- **Value traps.** A firm priced below its embedding peers may be cheap for a reason the
-  embedding does not capture; the signal is a relative-value prior, not a guarantee.
-- **Event risk in Health Care.** Binary catalysts (trial readouts, FDA decisions, patent
-  cliffs, M&A) can swamp relative-value signals, especially in clinical-stage biotech;
-  position sizing and possibly excluding pre-revenue names should be considered.
-- **Shorting frictions.** Borrow availability and cost for smaller-cap healthcare names can
-  erode the short leg.
-- **Ownership crowding.** Because the signal is built from holdings, crowded names can unwind
-  together; monitor concentration on both legs.
-
-## 10. References
+## References
 
 Gabaix, X., Koijen, R. S. J., Richmond, R. J., & Yogo, M. (2025). *Asset Embeddings.*
 Working paper. — methodology (OS-BERT, relative valuation benchmark) underlying this project.
