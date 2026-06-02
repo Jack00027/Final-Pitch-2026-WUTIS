@@ -1,0 +1,12 @@
+# Core ML
+torch>=2.2
+transformers>=4.40
+
+# Data
+numpy>=1.26
+pandas>=2.2
+pyarrow>=15.0          # parquet/feather support for pandas
+
+# Evaluation / utilities
+scikit-learn>=1.4      # clustering & nearest-neighbour sanity checks
+tqdm>=4.66
