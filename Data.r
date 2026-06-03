@@ -14,7 +14,7 @@ MIN_STOCKS     <- 20     # per investor-quarter
 MIN_INVESTORS  <- 20     # per stock-quarter
 MAX_TOP1_PCT   <- 0.75   # max single-holding weight
 REPORT_WINDOW  <- 5      # days before quarter-end for fund reports
-CONTEXT_WINDOW <- 62     # OS-BERT max sequence length (now: investors per chunk)
+CONTEXT_WINDOW <- 62     # OS-BERT max sequence length
 
 out_dir <- "data_wutis"     # data directory
 
@@ -23,9 +23,7 @@ TEST_MODE <- TRUE   # set to FALSE for full run; TRUE runs 2 quarters for quick 
 
 if (TEST_MODE) {
   START_QUARTER <- ymd("2019-07-01")
-  END_QUARTER   <- ymd("2019-12-31")   # 2 quarters only
-  # Keep MIN_STOCKS / MIN_INVESTORS as-is so cleaning logic is identical.
-  # If too few rows survive pruning, lower these to e.g. 10 each.
+  END_QUARTER   <- ymd("2019-12-31")
   out_dir <- "data_wutis/test"
 }
 
