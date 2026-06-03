@@ -49,7 +49,7 @@ quarter_ends <- seq.Date(
   by = "quarter"
 )
 
-# Lazy reference for issuer mapping (joined server-side, never downloaded)
+# Lazy reference for issuer mapping
 sec_map_lazy <- tbl_sec_map |>
   filter(!is.na(factset_entity_id)) |>
   select(fsym_id, issuer_id = factset_entity_id)
@@ -84,14 +84,14 @@ for (i in seq_along(quarter_ends)) {
 
   t0 <- Sys.time()
 
-# Precompute date bounds in R (dbplyr can't push date - numeric to Postgres SQL)
+# Precompute date bounds
   q_13f_lo  <- qe - 7
   q_13f_hi  <- qe + 7
   q_fund_lo <- qe - REPORT_WINDOW
   q_fund_hi <- qe + REPORT_WINDOW
 
 
-  # ── 1. 13F holdings ──  (identical to PS-BERT)
+  # ── 1. 13F holdings 
   holdings_13f <- tbl_13f |>
     filter(entity_sub_type == "HF",
            report_date >= q_13f_lo,
@@ -106,7 +106,7 @@ for (i in seq_along(quarter_ends)) {
               .groups = "drop")
 
 
-  # ── 2. Fund holdings ──  (identical to PS-BERT)
+  # ── 2. Fund holdings
   holdings_fund <- tbl_fund |>
     inner_join(sec_map_lazy, by = "fsym_id") |>
     inner_join(fund_map, by = "factset_fund_id") |>
@@ -160,11 +160,11 @@ for (i in seq_along(quarter_ends)) {
   }
 
 
-  # ── 5. Ownership → investor token sequences  (TRANSPOSED for OS-BERT) ──
+  # ── 5. Ownership → investor token sequences ──
   #    Group by ASSET; order its investors by descending ownership share.
   #    Within an asset-quarter every investor holds at the same price, so
-  #    descending adj_mv == descending ownership share (and, as in PS-BERT,
-  #    dividing by the group sum to get `s` does not change the order).
+  #    descending adj_mv == descending ownership share.
+  
   sequences <- holdings |>
     group_by(issuer_id, quarter_end) |>
     mutate(s = adj_mv / sum(adj_mv)) |>
