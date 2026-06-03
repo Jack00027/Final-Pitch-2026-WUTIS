@@ -84,7 +84,7 @@ for (i in seq_along(quarter_ends)) {
 
   t0 <- Sys.time()
 
-  # Precompute date bounds in R (dbplyr can't push date - numeric to Postgres SQL)
+# Precompute date bounds in R (dbplyr can't push date - numeric to Postgres SQL)
   q_13f_lo  <- qe - 7
   q_13f_hi  <- qe + 7
   q_fund_lo <- qe - REPORT_WINDOW
