@@ -22,6 +22,15 @@ ENV/
 .env
 *.key
 credentials.json
+# WRDS / FactSet credentials — NEVER commit
+.Renviron
+.Rprofile.local
+
+# R session artifacts
+.Rhistory
+.RData
+.Rapp.history
+.Rproj.user/
 
 # Data & model artifacts (often large — keep out of git)
 data/
