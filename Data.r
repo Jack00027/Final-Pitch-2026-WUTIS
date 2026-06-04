@@ -127,7 +127,7 @@ for (i in seq_along(quarter_ends)) {
     summarise(adj_mv = sum(as.numeric(adj_mv)), .groups = "drop")
 
 
-  # ── 3. Combine ──  (identical)
+  # ── 3. Combine ── 
   holdings <- bind_rows(holdings_13f, holdings_fund)
   rm(holdings_13f, holdings_fund)
 
@@ -137,10 +137,7 @@ for (i in seq_along(quarter_ends)) {
   }
 
 
-  # ── 4. Concentration filter + bipartite pruning ──  (identical)
-  #    The bipartite pruning (>=20 investors per stock) implicitly
-  #    removes micro/nano caps since they have too few holders,
-  #    making a separate market-cap filter unnecessary.
+  # ── 4. Concentration filter + bipartite pruning 
   holdings <- holdings |>
     group_by(investor_id, quarter_end) |>
     filter(max(adj_mv) / sum(adj_mv) <= MAX_TOP1_PCT) |>
