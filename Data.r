@@ -155,3 +155,7 @@ for (i in seq_along(quarter_ends)) {
     message("   nothing survived pruning, skipping")
     next
   }
+
+
+
+  
