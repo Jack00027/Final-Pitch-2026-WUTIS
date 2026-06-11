@@ -1,41 +1,5 @@
 # Train a BERT masked-language model on investor holdings to embed firms.
 
-"""
-OS-BERT training on quarterly ownership sequences.
-
-Symmetric dual of the PS-BERT script: identical architecture and two-stage
-recipe (MLM pre-training + sentence-transformer InfoNCE fine-tuning), but
-trained on ASSET-keyed sequences whose tokens are investor IDs ordered by
-descending ownership share. The output is one embedding per ASSET.
-
-Input (from Data_Cleaning_OS.r):
-  <seq-dir>/q_YYYY-MM-DD.parquet
-    columns: quarter_end, issuer_id, tokens (list[str] of investor ids,
-             descending ownership share), n_tokens, n_investors_full
-
-Pipeline per quarter:
-  1. Build a per-quarter vocabulary of investor tokens.
-  2. Wrap the vocabulary as a HuggingFace tokenizer.
-  3. Pre-train a small BERT with masked-token prediction (Trainer).
-  4. Save the post-pretraining checkpoint (for "pretrained-only" ablation).
-  5. Fine-tune with a sentence-transformer step (in-batch InfoNCE).
-  6. Compute mean-pooled asset embeddings (top-62 owners) and save as parquet.
-
-Outputs:
-  embeddings_os/q_YYYY-MM-DD.parquet   # issuer_id, quarter_end, dim_000..dim_d-1
-  models_os/q_YYYY-MM-DD/
-    tokenizer/             # saved HuggingFace tokenizer
-    trainer_logs/          # Trainer's internal logs
-    bert_pretrain.pt       # weights after MLM pretraining only
-    bert.pt                # weights after fine-tuning
-    history.json           # train/val loss curves from both phases
-
-Usage:
-  python OS_BERT_training.py --seq-dir data_wutis --emb-dir embeddings_os --model-dir models_os
-  python OS_BERT_training.py --test                     # run on data_wutis/test only
-  python OS_BERT_training.py --hidden-size 32           # 32-dim embeddings
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -272,7 +236,7 @@ def make_amp_context(device):
 
 
 # =========================================================================
-# Phase 1 — Pre-training (via HuggingFace Trainer)
+# Phase 1 — Pre-training 
 # =========================================================================
 def pretrain_mlm(model, train_dataset, val_dataset, tokenizer, cfg, output_dir):
     """Pre-train BERT with masked-language-modeling, using the standard
