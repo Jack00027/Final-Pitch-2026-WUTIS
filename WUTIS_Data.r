@@ -10,10 +10,9 @@ library(arrow)
 # ── Parameters ─────────────────────────────────────────────────
 START_QUARTER  <- ymd("2005-01-01")
 END_QUARTER    <- ymd("2025-12-31")
-MIN_STOCKS     <- 20     # per investor-quarter
-MIN_INVESTORS  <- 20     # per stock-quarter
-MAX_TOP1_PCT   <- 0.75   # max single-holding weight
-REPORT_WINDOW  <- 5      # days before quarter-end for fund reports
+MIN_STOCKS     <- 10     # per investor-quarter
+MIN_INVESTORS  <- 10     # per stock-quarter
+MAX_TOP1_PCT   <- 0.70   # max single-holding weight
 CONTEXT_WINDOW <- 62     # OS-BERT max sequence length
 
 out_dir <- "data_wutis"     # data directory
@@ -21,9 +20,12 @@ out_dir <- "data_wutis"     # data directory
 # ── Test mode ─────────────────────────────────────────────────
 TEST_MODE <- TRUE   # set to FALSE for full run; TRUE runs 2 quarters for quick testing
 
+# ── Overqrite existing files? ───────────────────────────────────────
+OVERWRITE <- TRUE   # set to FALSE to skip quarters with existing output files
+
 if (TEST_MODE) {
-  START_QUARTER <- ymd("2019-07-01")
-  END_QUARTER   <- ymd("2019-12-31")
+  START_QUARTER <- ymd("2025-10-01")
+  END_QUARTER   <- ymd("2026-03-31")
   out_dir <- "data_wutis/test"
 }
 
@@ -39,8 +41,6 @@ wrds <- dbConnect(
 )
 
 tbl_13f      <- tbl(wrds, in_schema("factset_own", "wrds_own_13f"))
-tbl_fund     <- tbl(wrds, in_schema("factset_own", "wrds_own_fund"))
-tbl_ent_fund <- tbl(wrds, in_schema("factset_own", "own_ent_funds"))
 tbl_sec_map  <- tbl(wrds, in_schema("factset_own", "own_sec_entity_eq"))
 
 quarter_ends <- seq.Date(
@@ -53,9 +53,6 @@ quarter_ends <- seq.Date(
 sec_map_lazy <- tbl_sec_map |>
   filter(!is.na(factset_entity_id)) |>
   select(fsym_id, issuer_id = factset_entity_id)
-
-fund_map <- tbl_ent_fund |> filter(!is.na(fund_type)) |>
-                            select(factset_fund_id, fund_type)
 
 
 # ── Sequence chunking helper ──────────────────────────────────
@@ -77,24 +74,22 @@ for (i in seq_along(quarter_ends)) {
 
   message("[", i, "/", length(quarter_ends), "] ", q_label)
 
-  if (file.exists(out_file)) {
+  if (file.exists(out_file) && !OVERWRITE) {
     message("   already exists, skipping")
     next
   }
 
   t0 <- Sys.time()
 
-# Precompute date bounds
+  # Precompute date bounds
   q_13f_lo  <- qe - 7
   q_13f_hi  <- qe + 7
-  q_fund_lo <- qe - REPORT_WINDOW
-  q_fund_hi <- qe + REPORT_WINDOW
 
 
-  # ── 1. 13F holdings 
+  # ── 1. 13F holdings
+
   holdings_13f <- tbl_13f |>
-    filter(entity_sub_type == "HF",
-           report_date >= q_13f_lo,
+    filter(report_date >= q_13f_lo,
            report_date <= q_13f_hi,
            adj_mv > 0) |>
     inner_join(sec_map_lazy, by = "fsym_id") |>
@@ -102,34 +97,14 @@ for (i in seq_along(quarter_ends)) {
     collect() |>
     mutate(report_date = as.Date(report_date), quarter_end = qe) |>
     group_by(investor_id, quarter_end, issuer_id) |>
-    summarise(adj_mv = sum(as.numeric(adj_mv)), investor_type = "HF",
+    summarise(adj_mv = sum(as.numeric(adj_mv)), investor_type = "INST",
               .groups = "drop")
 
 
-  # ── 2. Fund holdings
-  holdings_fund <- tbl_fund |>
-    inner_join(sec_map_lazy, by = "fsym_id") |>
-    inner_join(fund_map, by = "factset_fund_id") |>
-    filter(fund_type %in% c("OEF", "ETF", "CEF", "VAR"),
-           report_date >= q_fund_lo,
-           report_date <= q_fund_hi,
-           adj_mv > 0) |>
-    select(investor_id = factset_fund_id, report_date, adj_mv,
-           investor_type = fund_type, issuer_id) |>
-    collect() |>
-    filter(!is.na(issuer_id)) |>
-    mutate(report_date = as.Date(report_date), quarter_end = qe) |>
-    arrange(investor_id, issuer_id, desc(report_date)) |>
-    group_by(investor_id, issuer_id) |>
-    slice_head(n = 1) |>
-    ungroup() |>
-    group_by(investor_id, investor_type, quarter_end, issuer_id) |>
-    summarise(adj_mv = sum(as.numeric(adj_mv)), .groups = "drop")
+  # ── 2. Holdings (13F only)
 
-
-  # ── 3. Combine ── 
-  holdings <- bind_rows(holdings_13f, holdings_fund)
-  rm(holdings_13f, holdings_fund)
+  holdings <- holdings_13f
+  rm(holdings_13f)
 
   if (nrow(holdings) == 0) {
     message("   no holdings, skipping")
@@ -137,7 +112,7 @@ for (i in seq_along(quarter_ends)) {
   }
 
 
-  # ── 4. Concentration filter + bipartite pruning 
+  # ── 3. Concentration filter + bipartite pruning
   holdings <- holdings |>
     group_by(investor_id, quarter_end) |>
     filter(max(adj_mv) / sum(adj_mv) <= MAX_TOP1_PCT) |>
@@ -157,5 +132,38 @@ for (i in seq_along(quarter_ends)) {
   }
 
 
+  # ── 5. Ownership → investor token sequences ──
+  #    Group by ASSET; order its investors by descending ownership share.
+  #    Within an asset-quarter every investor holds at the same price, so
+  #    descending adj_mv == descending ownership share.
 
-  
+  sequences <- holdings |>
+    group_by(issuer_id, quarter_end) |>
+    mutate(s = adj_mv / sum(adj_mv)) |>
+    arrange(desc(s), .by_group = TRUE) |>
+    summarise(tokens      = list(as.character(investor_id)),
+              n_investors = n(),
+              .groups     = "drop") |>
+    mutate(chunks = map2(tokens, n_investors, chunk_seq)) |>
+    unnest(chunks) |>
+    mutate(tokens   = chunks,
+           n_tokens = map_int(tokens, length)) |>
+    select(quarter_end, issuer_id,
+           tokens, n_tokens, n_investors_full = n_investors)
+
+
+  # ── 6. Save and free memory ──
+  write_parquet(sequences, out_file)
+
+  elapsed_min <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+  message(sprintf("   %s holdings, %s assets, %s sequences (%.1f min)",
+                  format(nrow(holdings), big.mark = ","),
+                  format(n_distinct(holdings$issuer_id), big.mark = ","),
+                  format(nrow(sequences), big.mark = ","),
+                  elapsed_min))
+
+  rm(holdings, sequences); gc(verbose = FALSE)
+}
+
+dbDisconnect(wrds)
+message("Done.")
