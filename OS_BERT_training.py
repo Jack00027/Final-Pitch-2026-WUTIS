@@ -356,7 +356,7 @@ def finetune_sentence_transformer(model, pair_dataset, cfg):
 
 
 # =========================================================================
-# Embedding extraction (bf16 autocast on CUDA)
+# Embedding extraction
 # =========================================================================
 @torch.no_grad()
 def compute_asset_embeddings(model, assets_df, stoi, cfg):
