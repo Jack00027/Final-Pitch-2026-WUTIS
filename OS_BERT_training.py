@@ -420,11 +420,18 @@ def split_by_issuer(df, encoded_sequences, train_split, seed):
 
 
 def save_embeddings_parquet(embeddings, assets_df, hidden_size, out_path):
-    """Write one row per asset with metadata columns + dim_000..dim_(d-1)."""
-    df = pd.DataFrame({
-        "issuer_id":   assets_df["issuer_id"].values,
-        "quarter_end": assets_df["quarter_end"].values,
-    })
+    """Write one row per asset with metadata columns + dim_000..dim_(d-1).
+
+    Identifier columns mirror the R sequence output: issuer_id is the asset key,
+    isin is the extra security-level label (one per issuer, carried through from
+    the holdings pipeline). isin is optional so older sequence files without it
+    still work.
+    """
+    meta = {"issuer_id": assets_df["issuer_id"].values}
+    if "isin" in assets_df.columns:
+        meta["isin"] = assets_df["isin"].values
+    meta["quarter_end"] = assets_df["quarter_end"].values
+    df = pd.DataFrame(meta)
     for d in range(hidden_size):
         df[f"dim_{d:03d}"] = embeddings[:, d]
     df.to_parquet(out_path, index=False)

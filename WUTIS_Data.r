@@ -9,7 +9,7 @@ library(arrow)
 
 # ── Parameters ─────────────────────────────────────────────────
 START_QUARTER  <- ymd("2005-01-01")
-END_QUARTER    <- ymd("2025-12-31")
+END_QUARTER    <- ymd("2026-03-31")
 MIN_STOCKS     <- 10     # per investor-quarter
 MIN_INVESTORS  <- 10     # per stock-quarter
 MAX_TOP1_PCT   <- 0.70   # max single-holding weight
@@ -18,7 +18,7 @@ CONTEXT_WINDOW <- 62     # OS-BERT max sequence length
 out_dir <- "data_wutis"     # data directory
 
 # ── Test mode ─────────────────────────────────────────────────
-TEST_MODE <- TRUE   # set to FALSE for full run; TRUE runs 2 quarters for quick testing
+TEST_MODE <- FALSE   # set to FALSE for full run; TRUE runs 2 quarters for quick testing
 
 # ── Overqrite existing files? ───────────────────────────────────────
 OVERWRITE <- TRUE   # set to FALSE to skip quarters with existing output files
@@ -86,25 +86,38 @@ for (i in seq_along(quarter_ends)) {
   q_13f_hi  <- qe + 7
 
 
-  # ── 1. 13F holdings
+  # ── 1. 13F holdings (collected at security grain so we can keep ISIN)
 
-  holdings_13f <- tbl_13f |>
+  raw_13f <- tbl_13f |>
     filter(report_date >= q_13f_lo,
            report_date <= q_13f_hi,
            adj_mv > 0) |>
     inner_join(sec_map_lazy, by = "fsym_id") |>
-    select(investor_id = factset_entity_id, issuer_id, report_date, adj_mv) |>
+    select(investor_id = factset_entity_id, issuer_id, report_date, adj_mv, isin) |>
     collect() |>
-    mutate(report_date = as.Date(report_date), quarter_end = qe) |>
+    mutate(report_date = as.Date(report_date), quarter_end = qe)
+
+  # Holdings aggregated to (investor, issuer): the asset is the issuer entity.
+  holdings_13f <- raw_13f |>
     group_by(investor_id, quarter_end, issuer_id) |>
     summarise(adj_mv = sum(as.numeric(adj_mv)), investor_type = "INST",
               .groups = "drop")
+
+  # Representative ISIN per issuer-quarter: the security with the largest value.
+  # (An issuer entity can span several securities/share classes, each with its
+  #  own ISIN, so we pick the primary one to keep exactly one ISIN per asset.)
+  isin_map <- raw_13f |>
+    group_by(quarter_end, issuer_id, isin) |>
+    summarise(mv = sum(as.numeric(adj_mv)), .groups = "drop_last") |>
+    slice_max(mv, n = 1, with_ties = FALSE) |>
+    ungroup() |>
+    select(quarter_end, issuer_id, isin)
 
 
   # ── 2. Holdings (13F only)
 
   holdings <- holdings_13f
-  rm(holdings_13f)
+  rm(holdings_13f, raw_13f)
 
   if (nrow(holdings) == 0) {
     message("   no holdings, skipping")
@@ -148,7 +161,8 @@ for (i in seq_along(quarter_ends)) {
     unnest(chunks) |>
     mutate(tokens   = chunks,
            n_tokens = map_int(tokens, length)) |>
-    select(quarter_end, issuer_id,
+    left_join(isin_map, by = c("quarter_end", "issuer_id")) |>
+    select(quarter_end, issuer_id, isin,
            tokens, n_tokens, n_investors_full = n_investors)
 
 
@@ -162,7 +176,7 @@ for (i in seq_along(quarter_ends)) {
                   format(nrow(sequences), big.mark = ","),
                   elapsed_min))
 
-  rm(holdings, sequences); gc(verbose = FALSE)
+  rm(holdings, sequences, isin_map); gc(verbose = FALSE)
 }
 
 dbDisconnect(wrds)
