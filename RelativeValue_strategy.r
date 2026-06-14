@@ -1,3 +1,4 @@
+#!/usr/bin/env Rscript
 # =============================================================================
 # WUTIS_book.R  —  Embedding-implied valuation, Health-Care long-short book
 # =============================================================================
@@ -20,26 +21,26 @@
 # Run a no-data demo (synthesises OS-BERT-format embeddings for the real ISINs):
 #   DEMO <- TRUE  (below), then  Rscript WUTIS_book.R
 # =============================================================================
- 
+
 suppressPackageStartupMessages({
   library(tidyverse)
   library(arrow)
   library(readxl)
 })
- 
+
 # ── Parameters (edit here) ───────────────────────────────────────────────────
 EMB_DIR        <- "embeddings_os"            # OS-BERT output dir
 VALUATION_XLSX <- "Combined_US_Stocks.xlsx"  # Bloomberg export
 CACHE_DIR      <- "cache"
 RESULTS_DIR    <- "results"
- 
+
 # The sheet's Q / Q-1 / Q-2 columns are quarter-end snapshots, pulled 2026-06-12:
 # Q = 2026-03-31 (latest completed quarter), Q-1 = Dec-2025, Q-2 = Sep-2025.
 # IMPORTANT: the VALUES below must equal your embedding FILE labels, q_<value>.parquet
 # (the loader keys off the filename). Most files are labelled by quarter-end, but the
 # Sep-2025 file is labelled 2025-10-01, so Q-2 uses that exact string.
 QUARTER_MAP <- c("Q" = "2026-03-31", "Q-1" = "2025-12-31", "Q-2" = "2025-10-01")
- 
+
 SECTOR_FILTER  <- "Health Care"   # tradable book; NA to trade the whole market
 FIT_UNIVERSE   <- "all"           # "all" = fit implied-E/P on full cross-section
                                   # then trade the sector; "sector" = fit within it
@@ -48,10 +49,10 @@ MIN_MARKET_CAP <- 0               # off: the >=10-institutional-owner pruning in
                                   # WUTIS_Data.r already defines the universe, and
                                   # the ISIN join enforces it, so a size floor is
                                   # redundant. Set >0 only for a sensitivity check.
- 
+
 L2_NORMALIZE   <- TRUE
 WINSOR         <- c(0.01, 0.99)   # per-quarter E/P winsorisation
- 
+
 # P/E source for the valuation signal:
 #   "finratio" = WRDS Financial Ratios firm-level table (clean, standardised,
 #                history to 1970; run wrds_pull_finratio.R first). Recommended.
@@ -63,7 +64,7 @@ FINRATIO_PARQUET <- "finratio.parquet"   # output of wrds_pull_finratio.R
 # the Cigna trailing-EPS artifact). capei = Shiller CAPE. (Univariate signal:
 # only this one measure drives E/P; add others later if you want a composite.)
 PE_VAR           <- "pe_exi"
- 
+
 # Universe source:
 #   "bloomberg"  = the xlsx (current quarters in QUARTER_MAP); GICS sector from
 #                  the sheet. Survivorship-biased for history, but fine for the
@@ -73,58 +74,58 @@ PE_VAR           <- "pe_exi"
 #                  Ratios and GICS from Compustat (GICS_PARQUET). Use this for the
 #                  full historical backtest. Needs RETURN_SOURCE = "crsp", and the
 #                  CRSP / Financial-Ratios pulls widened to your full date range.
-UNIVERSE_SOURCE <- "bloomberg"
+UNIVERSE_SOURCE <- "embeddings"
 GICS_PARQUET    <- "gics.parquet"   # gvkey -> GICS sector, from wrds_pull_gics.R
- 
+
 # GICS sector code -> name (Compustat gsector). Health Care = 35.
 GICS_NAMES <- c("10" = "Energy", "15" = "Materials", "20" = "Industrials",
                 "25" = "Consumer Discretionary", "30" = "Consumer Staples",
                 "35" = "Health Care", "40" = "Financials",
                 "45" = "Information Technology", "50" = "Communication Services",
                 "55" = "Utilities", "60" = "Real Estate")
- 
-PROJECTION     <- "ridge"         # "ridge" (GCV) or "knn"
+
+PROJECTION     <- "knn"         # "ridge" (GCV) or "knn"
 RIDGE_LAMBDAS  <- 10 ^ seq(-2, 4, by = 0.5)
 KNN_K          <- 30
- 
+
 TOP_N          <- 10              # names per side
 USE_QUANTILE   <- FALSE
 QUANTILE_FRAC  <- 0.20
- 
+
 # Forward-return source for the signal check / benchmark:
 #   "crsp"   = real daily TOTAL returns + S&P 500 from the CRSP CIZ v2 file
 #              (run wrds_pull_crsp.R first to produce PRICES_CRSP)
 #   "mktcap" = crude quarter-over-quarter market-cap-ratio proxy (no extra data)
 RETURN_SOURCE   <- "crsp"
-PRICES_CRSP     <- "prices_crsp.parquet"   # output of wrds_pull_crsp.R
-FILING_LAG_DAYS <- 45            # 13F public ~45 days after quarter-end; trade after
+PRICES_CRSP     <- "prices_crsp2.parquet" 
+FILING_LAG_DAYS <- 0            # 13F public ~45 days after quarter-end; trade after
 HOLDING_DAYS    <- 90            # holding window for the forward total return
- 
+
 SEED           <- 42
 DEMO           <- FALSE           # TRUE -> synthetic embeddings for real ISINs
- 
+
 set.seed(SEED)
- 
+
 # ── Small helpers ────────────────────────────────────────────────────────────
 dim_names <- function(df) grep("^dim_", names(df), value = TRUE)
- 
+
 winsorize <- function(x, lo, hi) {
   qs <- quantile(x, c(lo, hi), na.rm = TRUE, names = FALSE)
   pmin(pmax(x, qs[1]), qs[2])
 }
- 
+
 zscore <- function(x) {
   s <- sd(x, na.rm = TRUE)
   if (is.na(s) || s == 0) return(x * 0)
   (x - mean(x, na.rm = TRUE)) / s
 }
- 
+
 l2_normalize_rows <- function(M) {
   n <- sqrt(rowSums(M * M))
   n[n == 0] <- 1
   M / n
 }
- 
+
 # Ridge with leave-one-out / generalised cross-validation over lambda, via SVD.
 # Mirrors sklearn RidgeCV (default GCV): standardise X, choose lambda by GCV,
 # return the in-sample fitted values (= implied E/P).
@@ -150,7 +151,7 @@ gcv_ridge_fitted <- function(X, y, lambdas = RIDGE_LAMBDAS) {
   }
   best_fit
 }
- 
+
 # kNN comps: implied E/P = median E/P of the k nearest peers by cosine similarity
 # (self excluded). Rows of V are assumed L2-normalised, so cosine = dot product.
 knn_implied <- function(V, y, k = KNN_K) {
@@ -163,7 +164,7 @@ knn_implied <- function(V, y, k = KNN_K) {
     median(y[nbr])
   }, numeric(1))
 }
- 
+
 # ── Load OS-BERT embeddings ──────────────────────────────────────────────────
 load_embeddings <- function(emb_dir = EMB_DIR) {
   files <- list.files(emb_dir, pattern = "^q_.*\\.parquet$", full.names = TRUE)
@@ -192,7 +193,7 @@ load_embeddings <- function(emb_dir = EMB_DIR) {
                   n_distinct(out$quarter_end), length(dim_names(out))))
   out
 }
- 
+
 # ── P/E from WRDS Financial Ratios (firm level) ──────────────────────────────
 # Map a quarter label to the Financial-Ratios public_date (a calendar quarter-end,
 # month-end). Quarter-end labels pass through; a quarter-START label (e.g. your
@@ -203,7 +204,7 @@ finratio_qend <- function(qlabel) {
     return(lubridate::floor_date(d, "quarter") - 1)     # prior quarter-end
   lubridate::ceiling_date(d, "quarter") - 1             # end of the containing quarter
 }
- 
+
 # Join P/E from FINRATIO_PARQUET onto the Bloomberg universe, matched by CUSIP
 # (auto 8/9-char from the table) and the quarter-end public_date. ISIN bridge:
 # US ISIN = "US" + 9-char CUSIP + check digit, so the CUSIP sits at chars 3..(2+L).
@@ -217,11 +218,11 @@ attach_pe_finratio <- function(panel) {
   L <- as.integer(names(sort(table(nchar(fr$cusip[fr$cusip != ""])),
                              decreasing = TRUE))[1])     # modal CUSIP length (8 or 9)
   fr <- fr |> transmute(cusip, public_date, pe = .data[[PE_VAR]])
- 
+
   qmap <- tibble(quarter_end = unique(panel$quarter_end))
   qmap$fr_date <- as.Date(vapply(qmap$quarter_end,
                                  function(q) as.character(finratio_qend(q)), character(1)))
- 
+
   panel |>
     mutate(cusip_key = toupper(substr(isin, 3, 2 + L))) |>
     left_join(qmap, by = "quarter_end") |>
@@ -229,7 +230,7 @@ attach_pe_finratio <- function(panel) {
     mutate(ep = ifelse(!is.na(pe) & pe > 0, 1 / pe, NA_real_)) |>
     select(-cusip_key, -fr_date, -pe_bbg)
 }
- 
+
 # ── Load Bloomberg valuation sheet ───────────────────────────────────────────
 load_valuation <- function(xlsx = VALUATION_XLSX) {
   cols <- c("ticker_full", "short_name", "isin", "ticker_short",
@@ -238,10 +239,10 @@ load_valuation <- function(xlsx = VALUATION_XLSX) {
             "gics_sector", "gics_grp", "gics_ind", "gics_subind")
   # rows 1-2 metadata, row 3 header, data from row 4 -> skip 3, supply our names
   raw <- read_excel(xlsx, skip = 3, col_names = cols)
- 
+
   num <- function(x) suppressWarnings(as.numeric(x))
   suf <- c("Q" = "Q", "Q-1" = "Qm1", "Q-2" = "Qm2")    # map keys -> column suffix
- 
+
   panel <- map_dfr(names(QUARTER_MAP), function(key) {
     s  <- suf[[key]]
     tibble(
@@ -255,23 +256,23 @@ load_valuation <- function(xlsx = VALUATION_XLSX) {
     )
   }) |>
     filter(!is.na(isin), isin != "")
- 
+
   # P/E source: WRDS Financial Ratios (clean, standardised) or Bloomberg columns.
   panel <- if (PE_SOURCE == "finratio") attach_pe_finratio(panel)
            else mutate(panel, pe = pe_bbg,
                        ep = ifelse(pe_bbg > 0, 1 / pe_bbg, NA_real_)) |> select(-pe_bbg)
   panel <- panel |> filter(!is.na(ep))
- 
+
   if (MIN_MARKET_CAP > 0)
     panel <- panel |> filter(market_cap >= MIN_MARKET_CAP)
- 
+
   panel <- panel |>                                    # one primary line per ISIN
     arrange(desc(market_cap)) |>
     distinct(isin, quarter_end, .keep_all = TRUE) |>
     group_by(quarter_end) |>
     mutate(ep = winsorize(ep, WINSOR[1], WINSOR[2])) |>
     ungroup()
- 
+
   message(sprintf("  valuation: %s ticker-quarters with E/P (%d quarters; %s HC rows)",
                   format(nrow(panel), big.mark = ","),
                   n_distinct(panel$quarter_end),
@@ -279,7 +280,7 @@ load_valuation <- function(xlsx = VALUATION_XLSX) {
                          big.mark = ",")))
   panel
 }
- 
+
 # ── Valuation from WRDS (embeddings universe, survivorship-free) ─────────────
 # Build the valuation panel for ALL embedding (quarter, isin) pairs from the
 # survivorship-free sources: P/E + gvkey + ticker from Financial Ratios (matched
@@ -290,25 +291,25 @@ build_valuation_from_embeddings <- function(embeddings) {
     stop(sprintf("FINRATIO_PARQUET not found (%s). Run wrds_pull_finratio.R first.", FINRATIO_PARQUET))
   if (!file.exists(GICS_PARQUET))
     stop(sprintf("GICS_PARQUET not found (%s). Run wrds_pull_gics.R first.", GICS_PARQUET))
- 
+
   fr <- read_parquet(FINRATIO_PARQUET)
   fr$public_date <- as.Date(fr$public_date)
   fr$cusip <- toupper(trimws(as.character(fr$cusip)))
   L <- as.integer(names(sort(table(nchar(fr$cusip[fr$cusip != ""])), decreasing = TRUE))[1])
   frx <- fr |> transmute(cusip, public_date,
                          gvkey = as.character(gvkey), ticker, pe = .data[[PE_VAR]])
- 
+
   gics <- read_parquet(GICS_PARQUET) |>
     mutate(gvkey = as.character(gvkey),
            gics_sector = unname(GICS_NAMES[as.character(gsector)])) |>
     distinct(gvkey, .keep_all = TRUE) |>
     select(gvkey, gics_sector, conm)
- 
+
   uni  <- embeddings |> distinct(quarter_end, isin)
   qmap <- tibble(quarter_end = unique(uni$quarter_end))
   qmap$fr_date <- as.Date(vapply(qmap$quarter_end,
                                  function(q) as.character(finratio_qend(q)), character(1)))
- 
+
   val <- uni |>
     mutate(cusip_key = toupper(substr(isin, 3, 2 + L))) |>
     left_join(qmap, by = "quarter_end") |>
@@ -325,18 +326,18 @@ build_valuation_from_embeddings <- function(embeddings) {
     group_by(quarter_end) |>
     mutate(ep = winsorize(ep, WINSOR[1], WINSOR[2])) |>
     ungroup()
- 
+
   message(sprintf("  valuation (embeddings universe): %s firm-quarters with E/P, %d quarters; %s HC rows",
                   format(nrow(val), big.mark = ","), n_distinct(val$quarter_end),
                   format(sum(val$gics_sector == "Health Care", na.rm = TRUE), big.mark = ",")))
   val
 }
- 
+
 # ── Mispricing signal ────────────────────────────────────────────────────────
 build_signal <- function(embeddings, valuation) {
   dcols  <- dim_names(embeddings)
   merged <- inner_join(embeddings, valuation, by = c("quarter_end", "isin"))
- 
+
   out <- list()
   for (q in sort(unique(merged$quarter_end))) {
     pq <- merged |> filter(quarter_end == q)
@@ -365,12 +366,12 @@ build_signal <- function(embeddings, valuation) {
     stop("No quarter produced a signal — check the ISIN join and QUARTER_MAP.")
   bind_rows(out)
 }
- 
+
 # ── Build the long-short book ────────────────────────────────────────────────
 book_cols <- c("quarter_end", "side", "rank", "ticker", "short_name",
                "gics_sector", "market_cap", "pe", "ep", "implied_ep",
                "ep_resid", "signal")
- 
+
 select_legs <- function(pq) {
   s <- pq |> arrange(signal)                          # cheap first
   if (USE_QUANTILE) {
@@ -388,7 +389,7 @@ select_legs <- function(pq) {
     shorts |> mutate(side = "SHORT", rank = row_number())
   )
 }
- 
+
 build_book <- function(signal_panel) {
   df <- signal_panel
   if (!is.na(SECTOR_FILTER)) df <- df |> filter(gics_sector == SECTOR_FILTER)
@@ -404,7 +405,7 @@ build_book <- function(signal_panel) {
   if (length(books) == 0) stop("No book produced — check SECTOR_FILTER / universe.")
   bind_rows(books)
 }
- 
+
 # ── Forward returns ──────────────────────────────────────────────────────────
 # (A) crude market-cap-ratio proxy: quarter t -> t+1 change in market cap.
 forward_returns_mktcap <- function(valuation) {
@@ -417,7 +418,7 @@ forward_returns_mktcap <- function(valuation) {
     filter(!is.na(fwd_ret)) |>
     select(quarter_end, isin, fwd_ret)
 }
- 
+
 # (B) real forward TOTAL return from CRSP CIZ daily, plus the S&P 500 over the
 # same window. For each name: compound dlyret over [qe + lag, qe + lag + horizon].
 # ISIN -> CRSP bridge is length-agnostic: matches the prices file's CUSIP (8-char
@@ -429,9 +430,9 @@ forward_returns_crsp <- function(valuation, prices_path = PRICES_CRSP,
                  prices_path))
   prices <- read_parquet(prices_path)
   prices$dlycaldt <- as.Date(prices$dlycaldt)
- 
+
   qs <- sort(unique(valuation$quarter_end))
- 
+
   # S&P 500 window return per quarter — only if the prices file carries sprtrn.
   # (If you didn't pull a benchmark, this is skipped and the book just omits the
   # S&P columns; signal_check handles their absence.)
@@ -445,7 +446,7 @@ forward_returns_crsp <- function(valuation, prices_path = PRICES_CRSP,
              spx_ret = if (nrow(w)) prod(1 + w$sprtrn) - 1 else NA_real_)
     })
   } else NULL
- 
+
   # CUSIP bridge, length-agnostic: the prices file may carry a 9-char `cusip9`
   # (merged view) or an 8-char `cusip` (raw dsf_v2). Standardise to `ck` and derive
   # the matching ISIN substring from its modal length.
@@ -453,30 +454,39 @@ forward_returns_crsp <- function(valuation, prices_path = PRICES_CRSP,
   prices$ck <- toupper(trimws(as.character(prices[[ccol]])))
   L <- as.integer(names(sort(table(nchar(prices$ck[prices$ck != ""])),
                              decreasing = TRUE))[1])
- 
+
   uni <- valuation |> distinct(quarter_end, isin) |>
-    mutate(ck    = toupper(substr(isin, 3, 2 + L)),
-           entry = as.Date(quarter_end) + lag,
-           exit  = entry + horizon)
+    mutate(ck = toupper(substr(isin, 3, 2 + L)))
   px <- prices |>
     filter(ck %in% unique(uni$ck),
            dlycaldt >= (min(as.Date(qs)) + lag),
            dlycaldt <= (max(as.Date(qs)) + lag + horizon),
            !is.na(dlyret)) |>
     select(ck, dlycaldt, dlyret)
- 
-  stock <- uni |>
-    inner_join(px, by = "ck") |>
-    filter(dlycaldt >= entry, dlycaldt <= exit) |>
-    group_by(quarter_end, isin) |>
-    summarise(fwd_ret = prod(1 + dlyret) - 1, n_days = n(), .groups = "drop")
- 
+
+  # Per-quarter compounding. A single inner_join(uni, px, by = "ck") forms the
+  # cross-product of every (name, quarter) against EVERY daily price row that name
+  # has over the whole sample, pruning by date only afterwards — on a multi-year
+  # panel that is hundreds of millions of rows and exhausts memory. Scoping each
+  # quarter to its own [entry, exit] window keeps the join at one row per name.
+  stock <- map_dfr(qs, function(q) {
+    entry <- as.Date(q) + lag; exit <- entry + horizon
+    p_q <- px |> filter(dlycaldt >= entry, dlycaldt <= exit)
+    if (nrow(p_q) == 0L) return(NULL)
+    u_q <- uni |> filter(quarter_end == q) |> distinct(isin, ck)
+    p_q |>
+      group_by(ck) |>
+      summarise(fwd_ret = prod(1 + dlyret) - 1, n_days = n(), .groups = "drop") |>
+      inner_join(u_q, by = "ck") |>
+      transmute(quarter_end = q, isin, fwd_ret, n_days)
+  })
+
   if (is.null(spx_rows)) return(stock)
   stock |>
     left_join(spx_rows, by = "quarter_end") |>
     mutate(excess_ret = fwd_ret - spx_ret)
 }
- 
+
 signal_check <- function(signal_panel, fwd) {
   df <- signal_panel
   if (!is.na(SECTOR_FILTER)) df <- df |> filter(gics_sector == SECTOR_FILTER)
@@ -503,7 +513,7 @@ signal_check <- function(signal_panel, fwd) {
   if (length(rows) == 0) return(tibble())
   bind_rows(rows)
 }
- 
+
 # ── Demo: synthetic OS-BERT-format embeddings for the real ISINs ─────────────
 # E/P is partially encoded along one direction so the ridge has real explanatory
 # content and the residual is the unexplained part. Forward returns are NOT
@@ -526,12 +536,12 @@ write_demo_embeddings <- function(valuation, d = 64L, emb_dir = EMB_DIR) {
   message(sprintf("  [demo] wrote synthetic embeddings for %d quarter(s) -> %s",
                   n_distinct(valuation$quarter_end), emb_dir))
 }
- 
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 main <- function() {
   dir.create(CACHE_DIR,   showWarnings = FALSE, recursive = TRUE)
   dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
- 
+
   if (UNIVERSE_SOURCE == "embeddings") {
     message("[1/4] OS-BERT asset embeddings (universe = all quarters)")
     embeddings <- load_embeddings()
@@ -544,23 +554,23 @@ main <- function() {
     message("[2/4] OS-BERT asset embeddings")
     embeddings <- load_embeddings()
   }
- 
+
   message("[3/4] embedding-implied E/P -> mispricing signal")
   signal <- build_signal(embeddings, valuation)
- 
+
   message("[4/4] long-short book + signal check")
   book <- build_book(signal)
   fwd  <- if (RETURN_SOURCE == "crsp") forward_returns_crsp(valuation)
           else forward_returns_mktcap(valuation)
   chk  <- signal_check(signal, fwd)
- 
+
   write_parquet(signal, file.path(CACHE_DIR, "signal_panel.parquet"))
   write_parquet(book,   file.path(RESULTS_DIR, "book_all.parquet"))
   for (q in unique(book$quarter_end))
     write_csv(book |> filter(quarter_end == q),
               file.path(RESULTS_DIR, sprintf("book_%s.csv", q)))
   if (nrow(chk) > 0) write_csv(chk, file.path(RESULTS_DIR, "signal_check.csv"))
- 
+
   for (q in sort(unique(book$quarter_end))) {
     cat(sprintf("\n===== %s book — %s (%s) =====\n",
                 ifelse(is.na(SECTOR_FILTER), "ALL", SECTOR_FILTER), q, PROJECTION))
@@ -571,7 +581,7 @@ main <- function() {
                 signal = round(signal, 4)) |>
       as.data.frame() |> print(row.names = FALSE)
   }
- 
+
   if (nrow(chk) > 0) {
     src <- if (RETURN_SOURCE == "crsp") "CRSP total returns vs S&P 500"
            else "market-cap-derived fwd returns"
@@ -583,7 +593,7 @@ main <- function() {
   cat(sprintf("\nbook + check -> %s\n", RESULTS_DIR))
   invisible(list(book = book, check = chk))
 }
- 
+
 # Run the pipeline. (Previously guarded by sys.nframe() == 0L, which fires under
 # `Rscript file.R` but NOT under `source(file)` — source() adds a stack frame, so
 # sys.nframe() is not 0. Call main() unconditionally so source() runs it too.)
