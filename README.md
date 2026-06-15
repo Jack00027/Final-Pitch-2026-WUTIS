@@ -154,10 +154,10 @@ Run by [healthcare_statarb.R](healthcare_statarb.R). Putting it all together:
 1. **Group.** Use last quarter's embeddings to sort stocks into **8 peer clusters**
    (we wait 45 days after quarter-end, because 13F filings are public with a lag).
 2. **Restrict to Health Care.** We only ever hold Health Care names.
-3. **Score, every day.** Within each cluster, measure how far each stock's return sits
+3. **Score.** Within each cluster, measure how far each stock's return sits
    from its cluster's average.
 4. **Trade.** Buy the biggest laggards, short the biggest leaders, in equal dollar amounts
-   (so the book is market-neutral). Bet on reversion the next day.
+   (so the book is market-neutral). Bet on reversion.
 5. **Be honest about costs.** Trading daily racks up turnover, so we subtract realistic
    trading costs (5 bps per unit traded). The **after-cost** number is the one that counts.
 
