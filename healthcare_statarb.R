@@ -1,205 +1,311 @@
-# explore_embeddings.R  —  Health Care clusters (validates the stat-arb peer groups)
-# ----------------------------------------------------------------------------
-# Refocused on the peer structure healthcare_statarb.R actually trades: cluster
-# the OS-BERT asset embeddings WITHIN Health Care (K matched to the strategy),
-# and contrast the embedding clusters against the GICS HC sub-industries. This
-# is the visual / quantitative companion to the backtest's "embeddings beat
-# GICS" result — it shows *how* the embedding regroups HC vs the obvious
-# benchmark. Company names come from the Compustat bridge, so the neighbour tour
-# shows real firms.
-#
-# Inputs: embeddings_os/q_*.parquet, finratio.parquet, gics.parquet
-# ----------------------------------------------------------------------------
-library(arrow); library(tidyverse); library(skmeans); library(cluster)
+# =============================================================================
+# Embedding-clustered daily residual reversion — US Health Care
+# =============================================================================
 
-# ── Parameters ────────────────────────────────────────────────
-EMB_FILE         <- "embeddings_os/q_2025-12-31.parquet"  # representative quarter — point at
-                                                          # the SAME file the strategy clusters
-                                                          # (your file used embeddings_os/test/;
-                                                          # use whichever holds 2025-12-31)
-FINRATIO_PARQUET <- "finratio.parquet"   # cusip -> gvkey  (wrds_pull_finratio.R)
-GICS_PARQUET     <- "gics.parquet"        # gvkey -> GICS   (wrds_pull_gics.R)
-TRADE_SECTOR     <- "Health Care"
-K                <- 8        # embedding clusters — match N_CLUSTERS in healthcare_statarb.R
-N_NEIGHBORS      <- 8
-OUT_DIR          <- "exhibits"
-SEED             <- 42
-SIL_SAMPLE       <- 2000     # subsample for silhouette (full NxN is large; HC is small)
+library(tidyverse)
+library(arrow)
+library(slider)    # rolling windows; install.packages("slider")
+library(skmeans)   # spherical k-means; install.packages("skmeans")
 
-set.seed(SEED)
-dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+# ── Parameters ───────────────────────────────────────────────────────────────
+EMB_DIR          <- "embeddings_os"
+PRICES_PARQUET   <- "prices_crsp2.parquet"
+FINRATIO_PARQUET <- "finratio.parquet"
+GICS_PARQUET     <- "gics.parquet"
 
-GICS_NAMES <- c("10"="Energy","15"="Materials","20"="Industrials","25"="Consumer Discretionary",
-                "30"="Consumer Staples","35"="Health Care","40"="Financials",
-                "45"="Information Technology","50"="Communication Services",
-                "55"="Utilities","60"="Real Estate")
-# GICS HC industries (gind, 6-digit) -> readable names; raw code kept as fallback.
-HC_GIND_NAMES <- c("351010"="HC Equipment & Supplies","351020"="HC Providers & Services",
-                   "351030"="HC Technology","352010"="Biotechnology",
-                   "352020"="Pharmaceuticals","352030"="Life Sciences Tools")
+TRADE_SECTOR_CODE <- "35"          # GICS sector to trade; 35 = Health Care
+CLUSTER_SCOPE     <- "healthcare"  # "healthcare" = cluster WITHIN HC (self-contained)
+                                   # "all"        = cluster the broad universe, trade only HC
+N_CLUSTERS        <- 8             # embedding clusters (kept near the HC GICS industry count)
 
-# 8-char CUSIP is the common key: US ISIN = "US" + 9-char CUSIP -> chars 3..10.
-ck8_cusip <- function(x) toupper(substr(trimws(as.character(x)), 1, 8))
-ck8_isin  <- function(x) toupper(substr(trimws(as.character(x)), 3, 10))
+LAG_DAYS       <- 45    # 13F public ~45d after quarter-end -> point-in-time entry
+VOL_WINDOW     <- 60    # trailing days for residual vol-adjustment
+N_QUANTILES    <- 20    # long the bottom 1/N, short the top 1/N, within each cluster
+REBALANCE_DAYS <- 1     # holding period in TRADING days (~21 = month, ~5 = week)
+SIGNAL_WINDOW  <- 1     # residual lookback in TRADING days; keep ~= REBALANCE_DAYS for a
+                        # coherent horizon (1/1 daily, 5/5 weekly). 1 = the daily strategy.
 
+TRADING_COSTS  <- TRUE  # FALSE = gross (no costs)
+COST_BPS       <- 5     # bps of traded notional per unit turnover (per rebalance)
 
-# ── Load embeddings ───────────────────────────────────────────
-emb_raw  <- read_parquet(EMB_FILE)
-q_label  <- basename(EMB_FILE) |> str_remove("^q_") |> str_remove("\\.parquet$")
-dim_cols <- grep("^dim_", names(emb_raw), value = TRUE)
+RUN_GICS_BENCHMARK <- TRUE   # also run the GICS-grouped engine for comparison
+GICS_LEVEL         <- "gind" # GICS grouping for the benchmark: "gind" or "ggroup"
 
+LIQUIDITY_SCREEN <- FALSE    # keep only the most liquid names (cost model + shortability)
+LIQ_PCT          <- 0.8      # fraction of the HC universe to keep, by market cap
 
-# ── GICS lookup: ck8 -> sector / HC industry / company name ───
-fr   <- read_parquet(FINRATIO_PARQUET)
-ckgv <- tibble(ck = ck8_cusip(fr$cusip), gvkey = as.character(fr$gvkey)) |>
-  filter(ck != "", !is.na(gvkey), gvkey != "") |> distinct(ck, .keep_all = TRUE)
-g <- read_parquet(GICS_PARQUET) |>
+SWEEP          <- FALSE              # TRUE = horizon x cost grid of NET Sharpe
+SWEEP_HORIZONS <- c(1, 5, 21)        # signal = hold, in trading days
+SWEEP_COSTS    <- c(5, 10, 15, 20)   # bps/side, to stress the cost assumption
+
+SEED <- 42; set.seed(SEED)
+
+# Standardise every id to the 8-char CUSIP (issuer + issue, no check digit).
+ck_from_cusip <- function(x) toupper(substr(trimws(as.character(x)), 1, 8))  # first 8 of 9-char
+ck_from_isin  <- function(x) toupper(substr(trimws(as.character(x)), 3, 10)) # US ISIN chars 3..10
+
+# ── Small functions ──────────────────────────────────────────────────────────
+
+# Cluster rows of an embedding matrix with spherical k-means (L2-normalize first).
+assign_clusters <- function(M, k) {
+  M <- M / sqrt(rowSums(M^2))                 # row L2 norm (rotation-invariant)
+  k <- min(k, max(2L, nrow(M) - 1L))
+  skmeans(M, k)$cluster
+}
+
+# Add each stock's trailing k-day compounded return as `cumret` (k=1 -> daily return).
+add_cumret <- function(panel, window) {
+  panel |>
+    group_by(ck) |> arrange(date, .by_group = TRUE) |>
+    mutate(cumret = slide_dbl(ret, function(r) prod(1 + r) - 1,
+                              .before = window - 1, .complete = TRUE)) |>
+    ungroup()
+}
+
+# Turnover at each rebalance = total absolute weight change vs the previous one,
+# treating a name absent on either date as weight 0 (first rebalance = from cash).
+turnover_by_date <- function(weights) {
+  indexed <- weights |> mutate(r = match(date, sort(unique(date))))
+  curr <- indexed |> select(r, ck, w)
+  prev <- indexed |> transmute(r = r + 1, ck, w_prev = w)   # shift to align with next rebalance
+  full_join(curr, prev, by = c("r", "ck")) |>
+    mutate(w = coalesce(w, 0), w_prev = coalesce(w_prev, 0)) |>
+    group_by(r) |>
+    summarise(turnover = sum(abs(w - w_prev)), .groups = "drop") |>
+    left_join(distinct(indexed, r, date), by = "r") |>
+    arrange(date) |> select(date, turnover)
+}
+
+# Run the reversion engine for one grouping ("cluster" or "gics_group") and holding
+# period. Returns the cost-free daily gross series + per-rebalance turnover.
+run_engine <- function(panel, trading_days, group_col, hold) {
+  rebal_days <- trading_days[seq(1, length(trading_days), by = hold)]
+
+  # 1. target weights on each rebalance date: within each group, long the biggest
+  #    laggards and short the biggest leaders on the vol-adjusted residual z.
+  weights <- panel |>
+    filter(date %in% rebal_days, !is.na(.data[[group_col]]), !is.na(cumret), vol > 0) |>
+    group_by(date, across(all_of(group_col))) |>
+    filter(n() >= 2 * N_QUANTILES) |>                         # balanced tails only
+    mutate(z = (cumret - mean(cumret)) / vol,
+           rank = ntile(z, N_QUANTILES)) |>
+    filter((rank == 1 | rank == N_QUANTILES) & is_hc) |>      # extreme tails, HC only
+    mutate(side    = if_else(rank == 1, 1, -1),               # laggards long, leaders short
+           n_long  = sum(side == 1),
+           n_short = sum(side == -1),
+           w_raw   = if_else(side == 1, 1 / n_long, -1 / n_short)) |>  # equal weight per leg, per cluster
+    group_by(date) |>
+    mutate(w = w_raw / sum(abs(w_raw))) |>                    # gross = 1 per day
+    ungroup() |>
+    select(date, ck, w)
+  if (nrow(weights) == 0) stop(sprintf("no positions for grouping '%s'", group_col))
+
+  # 2. turnover per rebalance
+  turnover <- turnover_by_date(weights)
+
+  # 3. daily gross: each rebalance's weights earn returns until the next rebalance.
+  #    A day is governed by the most recent rebalance STRICTLY before it.
+  rebal_idx <- which(trading_days %in% rebal_days)
+  gov       <- findInterval(seq_along(trading_days) - 1L, rebal_idx)
+  day_gov   <- tibble(date = trading_days,
+                      gov_date = if_else(gov >= 1, rebal_days[pmax(gov, 1)], as.Date(NA))) |>
+    filter(!is.na(gov_date))
+  returns <- panel |> distinct(date, ck, ret)
+  gross <- day_gov |>
+    inner_join(weights, by = c("gov_date" = "date"), relationship = "many-to-many") |>
+    inner_join(returns, by = c("date", "ck")) |>
+    group_by(date) |> summarise(gross = sum(w * ret), .groups = "drop") |> arrange(date)
+
+  list(gross = gross, turnover = turnover, avg_turnover = mean(turnover$turnover, na.rm = TRUE))
+}
+
+# Apply a cost (bps per unit turnover, charged on rebalance dates) -> gross + net daily.
+net_series <- function(engine, cost_bps, costs_on = TRUE) {
+  cost <- engine$turnover |>
+    mutate(cost = if (costs_on) (cost_bps / 1e4) * turnover else 0) |>
+    select(date, cost)
+  engine$gross |>
+    left_join(cost, by = "date") |>
+    mutate(cost = coalesce(cost, 0), net = gross - cost) |> arrange(date)
+}
+
+# Annualized performance stats from a daily return series.
+daily_stats <- function(r) {
+  r <- r[!is.na(r)]
+  if (length(r) < 2) return(tibble(ann_ret = NA, ann_vol = NA, sharpe = NA, max_dd = NA, hit = NA))
+  cum <- cumprod(1 + r)
+  drawdown <- cum / cummax(cum) - 1
+  tibble(ann_ret = prod(1 + r)^(252 / length(r)) - 1,
+         ann_vol = sd(r) * sqrt(252),
+         sharpe  = mean(r) / sd(r) * sqrt(252),
+         max_dd  = min(drawdown),
+         hit     = mean(r > 0))
+}
+
+# ── Load inputs ──────────────────────────────────────────────────────────────
+dir.create("results", showWarnings = FALSE)
+message("loading inputs ...")
+
+# ck -> is_hc / GICS group / company name (via the finratio cusip->gvkey bridge)
+bridge <- read_parquet(FINRATIO_PARQUET) |>
+  transmute(ck = ck_from_cusip(cusip), gvkey = as.character(gvkey)) |>
+  filter(ck != "", gvkey != "") |>
+  distinct(ck, .keep_all = TRUE)
+sectors <- read_parquet(GICS_PARQUET) |>
   transmute(gvkey = as.character(gvkey),
-            gics_sector = unname(GICS_NAMES[as.character(gsector)]),
-            gind = as.character(gind), conm) |>
+            is_hc = as.character(gsector) == TRADE_SECTOR_CODE,
+            gics_group = as.character(.data[[GICS_LEVEL]]), conm) |>
   distinct(gvkey, .keep_all = TRUE)
-gics_lkp <- ckgv |> left_join(g, by = "gvkey") |>
-  transmute(ck, gics_sector,
-            gics_industry = coalesce(unname(HC_GIND_NAMES[gind]), gind),
-            conm)
+lookup <- bridge |> left_join(sectors, by = "gvkey") |>
+  transmute(ck, is_hc = coalesce(is_hc, FALSE), gics_group, conm)
+hc_ck <- lookup |> filter(is_hc) |> distinct(ck)
 
-
-# ── Join + filter to Health Care ──────────────────────────────
-emb <- emb_raw |>
-  mutate(ck = ck8_isin(isin)) |>
-  left_join(gics_lkp, by = "ck") |>
-  filter(gics_sector == TRADE_SECTOR, !is.na(gics_industry))
-
-if (nrow(emb) < 2 * K)
-  stop(sprintf("only %d HC names matched the GICS bridge — check the CUSIP join", nrow(emb)))
-
-ids  <- emb$issuer_id
-nm   <- coalesce(emb$conm, emb$issuer_id)        # real company names where available
-X    <- as.matrix(emb[dim_cols])
-l2 <- sqrt(rowSums(X^2)); l2[l2 == 0] <- 1
-Xn <- X / l2                                      # rows on the unit sphere
-
-cat(sprintf("%s Health Care assets x %d dims (quarter %s)\n",
-            format(nrow(Xn), big.mark = ","), length(dim_cols), q_label))
-
-
-# ── 1. Spherical k-means WITHIN Health Care ───────────────────
-sk          <- skmeans(Xn, k = K)
-labels      <- sk$cluster
-emb$cluster <- labels
-gics_grp    <- as.integer(factor(emb$gics_industry))   # GICS partition (for the contrast)
-
-
-# ── 2. Cohesion + the GICS contrast ───────────────────────────
-# On unit-norm rows tcrossprod is cosine similarity, so 1 - tcrossprod is exact
-# cosine distance. Silhouette of the embedding clusters vs the GICS partition vs
-# a random placebo, all measured in embedding space.
-sil_score <- function(mat, lab, n = SIL_SAMPLE) {
-  idx <- sample(seq_len(nrow(mat)), min(n, nrow(mat)))
-  d   <- as.dist(1 - tcrossprod(mat[idx, , drop = FALSE]))
-  mean(silhouette(lab[idx], d)[, "sil_width"])
+# embeddings: one frame of (quarter, ck, dim_*)
+emb_list <- list()
+for (f in list.files(EMB_DIR, pattern = "^q_.*\\.parquet$", full.names = TRUE)) {
+  q <- sub("^q_", "", tools::file_path_sans_ext(basename(f)))
+  d <- read_parquet(f) |> filter(!is.na(isin))
+  d$quarter <- q
+  d$ck      <- ck_from_isin(d$isin)
+  emb_list[[q]] <- d |> select(quarter, ck, starts_with("dim_"))
 }
-sil_emb  <- sil_score(Xn, labels)
-sil_gics <- sil_score(Xn, gics_grp)
-Xp <- matrix(rnorm(length(Xn)), nrow = nrow(Xn)); Xp <- Xp / sqrt(rowSums(Xp^2))
-sil_p <- sil_score(Xp, skmeans(Xp, k = K)$cluster)
+emb <- bind_rows(emb_list)
+dim_cols <- grep("^dim_", names(emb), value = TRUE)
 
-# Adjusted Rand index between the embedding clusters and the GICS industries:
-# low => the embedding regroups HC differently from GICS.
-adj_rand <- function(a, b) {
-  tab <- table(a, b)
-  si  <- sum(choose(as.numeric(rowSums(tab)), 2))
-  sj  <- sum(choose(as.numeric(colSums(tab)), 2))
-  sij <- sum(choose(as.numeric(tab), 2))
-  ex  <- si * sj / choose(sum(tab), 2)
-  (sij - ex) / ((si + sj) / 2 - ex)
+# prices: CRSP CIZ daily (assumes cusip + dlycaldt + dlyret + dlycap present)
+prices <- read_parquet(PRICES_PARQUET) |>
+  transmute(ck = ck_from_cusip(cusip), date = as.Date(dlycaldt),
+            ret = as.numeric(dlyret), cap = as.numeric(dlycap)) |>
+  filter(ck != "", !is.na(date), !is.na(ret)) |>
+  arrange(ck, date) |> distinct(ck, date, .keep_all = TRUE)
+
+# ── Trading windows: quarter q -> [as.Date(q) + LAG_DAYS, next entry) ─────────
+quarters <- sort(unique(emb$quarter))
+windows <- tibble(quarter = quarters, entry = as.Date(quarters) + LAG_DAYS) |>
+  arrange(entry) |> mutate(exit = lead(entry, default = max(entry) + 90))
+prices <- prices |>
+  mutate(wi = findInterval(date, windows$entry)) |> filter(wi >= 1) |>
+  mutate(quarter = windows$quarter[wi]) |> filter(date < windows$exit[wi]) |>
+  select(-wi)
+
+# trailing vol, lagged one day so the signal date can't see its own move
+prices <- prices |>
+  group_by(ck) |> arrange(date, .by_group = TRUE) |>
+  mutate(vol = lag(slide_dbl(ret, sd, .before = VOL_WINDOW - 1, .complete = TRUE))) |>
+  ungroup()
+
+# ── Liquidity screen: keep the top LIQ_PCT of each quarter by entry market cap ─
+liquid <- NULL
+if (LIQUIDITY_SCREEN) {
+  scope_ck <- if (CLUSTER_SCOPE == "healthcare") hc_ck$ck else unique(prices$ck)
+  liquid <- prices |>
+    filter(ck %in% scope_ck, !is.na(cap), cap > 0) |>
+    group_by(quarter, ck) |> summarise(entry_cap = first(cap), .groups = "drop") |>  # cap at entry (PIT)
+    group_by(quarter) |> filter(entry_cap >= quantile(entry_cap, 1 - LIQ_PCT)) |>
+    ungroup() |> select(quarter, ck)
 }
-ari_val <- adj_rand(labels, gics_grp)
 
-cat(sprintf("cosine silhouette   embeddings=%.3f   GICS industries=%.3f   random=%.3f\n",
-            sil_emb, sil_gics, sil_p))
-cat(sprintf("embedding-vs-GICS adjusted Rand = %.3f  (low => embeddings carve HC differently)\n",
-            ari_val))
+# ── Cluster per quarter (within HC, or the broad universe), auto-lowering K ───
+liq_label <- if (LIQUIDITY_SCREEN) sprintf("top %d%% by cap", round(100 * LIQ_PCT)) else "off"
+message(sprintf("clustering per quarter (scope %s | liquidity %s) ...", CLUSTER_SCOPE, liq_label))
+cluster_list <- list()
+for (q in quarters) {
+  e <- emb |> filter(quarter == q) |> distinct(ck, .keep_all = TRUE)
+  if (CLUSTER_SCOPE == "healthcare") e <- e |> semi_join(hc_ck, by = "ck")
+  if (LIQUIDITY_SCREEN)              e <- e |> semi_join(filter(liquid, quarter == q), by = "ck")
+  if (nrow(e) < 4 * N_QUANTILES) next                              # too thin for 2 clusters
+  k <- min(N_CLUSTERS, max(2L, nrow(e) %/% (2 * N_QUANTILES)))     # effective K this quarter
+  cluster_list[[q]] <- tibble(quarter = q, ck = e$ck,
+                              cluster = assign_clusters(as.matrix(e[, dim_cols]), k))
+}
+clusters <- bind_rows(cluster_list)
 
-# How each embedding cluster is composed of GICS industries (the cross-tab that
-# shows clusters cutting across / merging GICS buckets).
-comp <- emb |> count(cluster, gics_industry) |>
-  group_by(cluster) |> mutate(share = n / sum(n)) |> ungroup()
-write_csv(comp, file.path(OUT_DIR, sprintf("cluster_gics_composition_%s.csv", q_label)))
+# ── Panel: returns + cluster + GICS group + HC flag + vol ────────────────────
+panel <- prices |>
+  inner_join(clusters, by = c("quarter", "ck")) |>
+  left_join(select(lookup, ck, gics_group, is_hc), by = "ck") |>
+  mutate(is_hc = coalesce(is_hc, FALSE)) |>
+  filter(!is.na(vol), vol > 0)
 
+trading_days <- sort(unique(panel$date))
+n_hc <- panel |> filter(is_hc) |> distinct(ck) |> nrow()
+message(sprintf("panel: %s name-days | %d trading days | %s..%s | %d HC names traded",
+                format(nrow(panel), big.mark = ","), length(trading_days),
+                min(trading_days), max(trading_days), n_hc))
 
-# ── 3. 2D projection — coloured by embedding cluster AND by GICS ──
-project_2d <- function(mat) {
-  if (requireNamespace("uwot", quietly = TRUE)) {
-    list(coords = uwot::umap(mat, n_components = 2, metric = "cosine"), method = "UMAP")
-  } else if (requireNamespace("Rtsne", quietly = TRUE)) {
-    ts <- Rtsne::Rtsne(mat, dims = 2, perplexity = min(30, floor((nrow(mat)-1)/3)),
-                       check_duplicates = FALSE)
-    list(coords = ts$Y, method = "t-SNE")
-  } else {
-    list(coords = prcomp(mat, rank. = 2)$x[, 1:2], method = "PCA")
+# ── SWEEP mode: horizon x cost grid of NET Sharpe ────────────────────────────
+if (SWEEP) {
+  rows <- list()
+  for (h in SWEEP_HORIZONS) {
+    panel_h <- add_cumret(panel, h)
+    eng_emb  <- run_engine(panel_h, trading_days, "cluster", h)
+    eng_gics <- if (RUN_GICS_BENCHMARK) run_engine(panel_h, trading_days, "gics_group", h) else NULL
+    gross_sharpe <- daily_stats(eng_emb$gross$gross)$sharpe
+    for (cst in SWEEP_COSTS) {
+      d_emb    <- net_series(eng_emb, cst)
+      emb_net  <- daily_stats(d_emb$net)$sharpe
+      gics_net <- if (!is.null(eng_gics)) daily_stats(net_series(eng_gics, cst)$net)$sharpe else NA
+      rows[[length(rows) + 1]] <- tibble(
+        horizon = h, cost_bps = cst, emb_gross = gross_sharpe,
+        emb_net = emb_net, gics_net = gics_net,
+        edge = emb_net - gics_net, cost_drag = mean(d_emb$cost) * 252)
+    }
+  }
+  grid <- bind_rows(rows)
+
+  cat(sprintf("\nHorizon x cost sweep — NET Sharpe (scope %s | liquidity %s)\n\n",
+              CLUSTER_SCOPE, liq_label))
+  grid |> transmute(
+    horizon = sprintf("%2dd", horizon), `cost(bps)` = cost_bps,
+    `emb gross` = sprintf("%5.2f", emb_gross), `emb net` = sprintf("%5.2f", emb_net),
+    `GICS net` = sprintf("%5.2f", gics_net), edge = sprintf("%+5.2f", edge),
+    `emb drag` = sprintf("%4.1f%%", 100 * cost_drag)) |>
+    as.data.frame() |> print(row.names = FALSE)
+  cat("\nRead: pick (horizon, cost) where 'emb net' is healthy AND edge > 0 survives the\n")
+  cat("harsher cost columns. 'emb gross' is cost-free signal quality.\n")
+  write_csv(grid, "results/statarb_sweep.csv")
+  cat("-> results/statarb_sweep.csv\n")
+  quit(save = "no")
+}
+
+# ── SINGLE-RUN mode: one config, detailed gross/net table ────────────────────
+panel_run <- add_cumret(panel, SIGNAL_WINDOW)
+engines <- list(Embedding = run_engine(panel_run, trading_days, "cluster", REBALANCE_DAYS))
+if (RUN_GICS_BENCHMARK)
+  engines$GICS <- run_engine(panel_run, trading_days, "gics_group", REBALANCE_DAYS)
+
+# daily gross/net/cost per engine (computed once, reused for the table and outputs)
+daily <- list()
+for (nm in names(engines)) daily[[nm]] <- net_series(engines[[nm]], COST_BPS, TRADING_COSTS)
+
+cat(sprintf("\nEmbedding-clustered HC residual reversion%s\n",
+            if (RUN_GICS_BENCHMARK) "  vs  GICS benchmark" else ""))
+cat(sprintf("scope %s | liquidity %s | signal %dd / hold %dd | costs %s\n\n",
+            CLUSTER_SCOPE, liq_label, SIGNAL_WINDOW, REBALANCE_DAYS,
+            if (TRADING_COSTS) sprintf("ON (%g bps)", COST_BPS) else "OFF"))
+
+summary_rows <- list()
+for (nm in names(daily)) {
+  for (leg in c("gross", "net")) {
+    summary_rows[[length(summary_rows) + 1]] <-
+      daily_stats(daily[[nm]][[leg]]) |> mutate(engine = nm, leg = leg, .before = 1)
   }
 }
-proj <- project_2d(Xn)
-emb$x2d <- proj$coords[, 1]; emb$y2d <- proj$coords[, 2]
+summary <- bind_rows(summary_rows)
+summary |> transmute(engine, leg,
+  `ann ret` = sprintf("%6.1f%%", 100 * ann_ret), `ann vol` = sprintf("%6.1f%%", 100 * ann_vol),
+  Sharpe = sprintf("%6.2f", sharpe), `max DD` = sprintf("%6.1f%%", 100 * max_dd),
+  `hit %` = sprintf("%5.1f%%", 100 * hit)) |>
+  as.data.frame() |> print(row.names = FALSE)
 
-base_theme <- theme_minimal() +
-  theme(axis.text = element_blank(), axis.ticks = element_blank(), panel.grid = element_blank())
-
-# (a) coloured by embedding cluster — the groups the strategy trades
-p_clu <- ggplot(emb, aes(x2d, y2d, color = factor(cluster))) +
-  geom_point(size = 1.2, alpha = 0.8) +
-  scale_color_discrete(guide = "none") +
-  labs(title = sprintf("HC embedding clusters — %s", q_label),
-       subtitle = sprintf("%s HC firms, K=%d (skmeans); silhouette %.2f vs %.2f random",
-                          format(nrow(emb), big.mark = ","), K, sil_emb, sil_p),
-       x = NULL, y = NULL) + base_theme
-
-# (b) SAME map coloured by GICS industry — the benchmark partition, for contrast
-p_gics <- ggplot(emb, aes(x2d, y2d, color = gics_industry)) +
-  geom_point(size = 1.2, alpha = 0.8) +
-  labs(title = sprintf("Same firms, coloured by GICS industry — %s", q_label),
-       subtitle = sprintf("GICS silhouette %.2f; adj. Rand vs embedding clusters %.2f",
-                          sil_gics, ari_val),
-       color = "GICS industry", x = NULL, y = NULL) + base_theme
-
-ggsave(file.path(OUT_DIR, sprintf("hc_clusters_embedding_%s.png", q_label)),
-       p_clu,  width = 9, height = 7, dpi = 160)
-ggsave(file.path(OUT_DIR, sprintf("hc_clusters_gics_%s.png", q_label)),
-       p_gics, width = 9.6, height = 7, dpi = 160)
-
-emb |> select(issuer_id, isin, conm, gics_industry, cluster, x2d, y2d) |>
-  write_parquet(file.path(OUT_DIR, sprintf("hc_clusters_%s.parquet", q_label)))
-
-cat("\ncluster sizes:\n"); print(table(labels))
-cat("saved maps + assignments ->", OUT_DIR, "\n")
-
-
-# ── 4. Nearest neighbours (cosine), annotated with GICS industry ──
-# The pitch artifact: a firm's embedding neighbours often span GICS industries —
-# the cross-industry peer grouping GICS can't produce.
-ind_of <- setNames(emb$gics_industry, emb$issuer_id)
-neighbors <- function(id, k = N_NEIGHBORS) {
-  i <- match(id, ids); if (is.na(i)) return(NULL)
-  sims <- as.vector(Xn %*% Xn[i, ])
-  ord  <- order(sims, decreasing = TRUE); ord <- ord[ids[ord] != id][seq_len(k)]
-  tibble(name = nm[ord], industry = emb$gics_industry[ord], cosine = sims[ord])
+cat("\nturnover / cost:\n")
+for (nm in names(engines)) {
+  cat(sprintf("  %-9s avg daily turnover %.2f | implied annual cost drag %.1f%%\n",
+              nm, engines[[nm]]$avg_turnover, 100 * mean(daily[[nm]]$cost) * 252))
 }
 
-# representative firm per cluster = closest to the cluster's mean direction
-reps <- vapply(sort(unique(labels)), function(c) {
-  m <- which(labels == c)
-  ctr <- colMeans(Xn[m, , drop = FALSE]); ctr <- ctr / sqrt(sum(ctr^2))
-  m[which.max(Xn[m, , drop = FALSE] %*% ctr)]
-}, integer(1))
-
-cat("\n— representative HC firm per cluster + nearest neighbours —\n")
-for (j in seq_along(reps)) {
-  qi <- reps[j]
-  cat(sprintf("\n  cluster %d | %s  [%s]\n", labels[qi], nm[qi], emb$gics_industry[qi]))
-  nb <- neighbors(ids[qi])
-  for (r in seq_len(nrow(nb)))
-    cat(sprintf("      %.3f  %-28s %s\n", nb$cosine[r], str_trunc(nb$name[r], 28), nb$industry[r]))
-}
-
-cat("\nDone.\n")
+daily_out <- list()
+for (nm in names(daily)) daily_out[[nm]] <- daily[[nm]] |> mutate(engine = nm, .before = 1)
+write_parquet(bind_rows(daily_out), "results/statarb_daily.parquet")
+write_csv(summary, "results/statarb_summary.csv")
+cat("\n-> results/statarb_daily.parquet, results/statarb_summary.csv\n")
