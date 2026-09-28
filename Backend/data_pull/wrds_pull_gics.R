@@ -1,18 +1,6 @@
 # =============================================================================
 # wrds_pull_gics.R  —  static gvkey -> GICS sector (+ company name) from Compustat
 # =============================================================================
-# Produces  gics.parquet  for WUTIS_book.R (UNIVERSE_SOURCE = "embeddings").
-#
-# comp.company is one row per gvkey (header file) covering ACTIVE and INACTIVE
-# (delisted) firms, so the static GICS classification it carries is survivorship-
-# free — exactly what a historical backtest needs. GICS sector membership is
-# stable enough that a single (latest) label per firm is a sound approximation;
-# the point of using Compustat rather than the Bloomberg snapshot is COVERAGE of
-# the names that have since delisted, not point-in-time precision.
-#
-# WUTIS_book.R joins this to the Financial Ratios table by gvkey, and maps the
-# 2-digit gsector code to a name (35 = Health Care) via its GICS_NAMES table.
-# =============================================================================
 
 suppressPackageStartupMessages({
   library(RPostgres); library(DBI); library(dplyr); library(dbplyr); library(arrow)

@@ -132,9 +132,8 @@ Basket at the time of the pitch (embeddings as of 2025-12-31):
 
 - **Returns are a proxy.** Backtest returns are quarter-over-quarter changes in market equity. That approximates price return, but it also picks up share issuance and buybacks and ignores dividends. It is not a CRSP total-return series.
 - **No trading costs.** Transaction and borrow costs are not modelled. Short positions in small Health Care names can be expensive to borrow.
-- **Live picks use an in-sample fit.** The ridge in the live-picks script is fitted on the same cross-section it scores. The backtest uses cross-fitted predictions.
 - **GICS labels are static.** Each firm's current Compustat GICS label is applied to all history. This is survivorship-free in coverage but not point-in-time.
-- **Clustering not included.** The embedding-cluster visualisation shown in the pitch (spherical k-means on the embeddings) is not part of this repository.
+
 
 ## 5. Repository layout
 
@@ -200,7 +199,7 @@ Rscript Strategy/Regression_visual.r            # OOS R² chart
 
 ## Team
 
-Elias Söser (Team Lead) · Isabelle Afkhampour · Jacopo Mei (Model Development) · Florian Wimmer · Viktoriia Yasinska
+Elias Söser (Team Lead) · Isabelle Afkhampour · Jacopo Mei · Florian Wimmer · Viktoriia Yasinska
 
 ## References
 

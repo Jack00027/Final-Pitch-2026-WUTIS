@@ -1,21 +1,6 @@
 # =============================================================================
 # Relative Valuation Benchmark  (Gabaix-Koijen-Richmond-Yogo, Section 4.1)
 # =============================================================================
-# Builds the per-quarter valuation metric p_perp: the residual of a
-# cross-sectional regression of log market equity on log book equity.
-#
-#     log(market equity) = gamma_t * log(book equity) + alpha_t + p_perp
-#
-# Corrections in this version:
-#   * US stocks only  — keep ISINs starting "US".
-#   * Quarter file-name fix — canon_q() snaps 07-01/10-01 to true quarter-ends;
-#     emb_index keeps the real filename for loading.
-#   * K-fold cross-fitting — every firm gets an out-of-fold ridge prediction, so
-#     ai_predictions covers the FULL universe (not just a 20% holdout) and the
-#     backtest trades what you'd actually trade.
-#
-#   Rscript RelativeValue_strategy.r
-# =============================================================================
 
 library(tidyverse)
 library(arrow)
@@ -27,7 +12,7 @@ VALUATION <- "market_to_book"   # "market_to_book" -> regress log ME on log book
 
 LIQUIDITY_SCREEN <- TRUE        # TRUE  = estimate on liquid firms only
                                 # FALSE = full cross-section (for the paper's R^2)
-LIQ_PCT          <- 0.70        # fraction of each quarter to keep, by market cap
+LIQ_PCT          <- 0.50        # fraction of each quarter to keep, by market cap
 
 predictions_list <- list()
 

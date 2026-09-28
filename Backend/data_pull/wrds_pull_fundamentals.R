@@ -1,13 +1,6 @@
 # =============================================================================
 # wrds_pull_fundamentals.R
 # =============================================================================
-# Book equity, earnings, and market equity — all from ONE table: the
-# CRSP/Compustat Merged Fundamentals Quarterly file (ccmfundq). Writes
-# fundamentals.parquet with columns: ck, quarter, book_equity, earnings,
-# market_equity.
-#
-#   Rscript wrds_pull_fundamentals.R
-# =============================================================================
 
 library(RPostgres)
 library(DBI)

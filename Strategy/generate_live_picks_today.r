@@ -1,12 +1,7 @@
 # =============================================================================
 # generate_picks_crsp.r  —  HC Long/Short from latest embeddings + CRSP prices
 # =============================================================================
-# Same as the live version but sources market equity from prices_crsp2.parquet
-# (dlycap = market cap) instead of Yahoo. No ticker mapping, no rate limits.
-# Trade-off: CRSP is not real-time, so the "current" price is the LAST date in
-# your file (reported below) — not actually today.
-#   Rscript generate_picks_crsp.r
-# =============================================================================
+
 
 library(tidyverse)
 library(arrow)

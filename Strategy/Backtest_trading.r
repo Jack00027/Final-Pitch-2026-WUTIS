@@ -1,11 +1,6 @@
 # =============================================================================
 # AI Valuation Strategy Backtest (Long/Short Top 10)
 # =============================================================================
-# Strategy:
-#   - LONG the Top 10 most undervalued firms (Lowest p_perp)
-#   - SHORT the Top 10 most overvalued firms (Highest p_perp)
-#   - Equal weight, rebalanced quarterly.
-# =============================================================================
 
 library(tidyverse)
 library(arrow)
@@ -72,8 +67,6 @@ if (LAST_10_YEARS) {
 
 # ── 3. Portfolio Sorting (The AI Engine) ─────────────────────────────────────
 message("Sorting portfolios based on AI Mispricing...")
-
-PORTFOLIO_SIZE <- 60
 
 portfolios <- signals |>
   group_by(quarter) |>

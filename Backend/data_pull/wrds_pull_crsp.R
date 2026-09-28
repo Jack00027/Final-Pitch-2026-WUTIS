@@ -1,22 +1,6 @@
 # =============================================================================
 # wrds_pull_crsp.R  —  daily TOTAL returns + S&P 500 from the CRSP CIZ v2 file
 # =============================================================================
-# Produces  prices_crsp.parquet  for WUTIS_book.R (RETURN_SOURCE = "crsp").
-# Pulls the raw CIZ daily stock file (crsp_a_stock.dsf_v2). No benchmark: the S&P
-# 500 (sprtrn) is not in this file and the CIZ index tables aren't in this license,
-# so the book treats the S&P column as optional. Add your own daily series later.
-#
-# Fields kept:
-#   permno, dlycaldt, cusip, hdrcusip, ticker, siccd   (id / date)
-#   dlyret   = daily TOTAL return (dividends included)  <- the real forward return
-#   dlyretx  = daily price return (ex-dividends)
-#   dlyprc, dlyclose, dlycap, shrout              (price / size, for reference)
-#   (no sprtrn / benchmark — not pulled here)
-#
-# The ISIN -> CRSP bridge lives in WUTIS_book.R, length-agnostic: US ISIN = "US" +
-# 9-char CUSIP + check digit, so the 8-char `cusip` = substr(isin, 3, 10) and the
-# 9-char form = substr(isin, 3, 11); the book auto-detects which the file carries.
-# =============================================================================
 
 suppressPackageStartupMessages({
   library(RPostgres); library(DBI); library(dplyr); library(dbplyr); library(arrow)
