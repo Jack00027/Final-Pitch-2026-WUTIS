@@ -1,270 +1,214 @@
-# Healthcare Relative Value via Asset Embeddings
+# Machine Learning from Portfolio Holdings
 
-### A WUTIS — WU Trading & Investment Society — Investment Pitch
+### An asset-embedding approach to US Health Care equity selection
 
-> Build holdings-based **asset embeddings** for US firms with the **OS-BERT** methodology of Gabaix, Koijen, Richmond & Yogo (2025), use them to define **peer groups** for US Health Care firms, and trade a **sector-neutral, embedding-clustered daily residual-reversion** book — long the day's underperformers and short the outperformers *within* each embedding peer group. The headline test: do embedding peer groups beat GICS industries for Health Care relative value?
+*WUTIS — WU Trading & Investment Society · Global Markets · Final Pitch, June 2026 · Investment horizon: 3 months*
+
+We learn a vector representation ("embedding") of every US stock from **who owns it**, using the OS-BERT method of Gabaix, Koijen, Richmond & Yogo (2025). The embeddings define each firm's true, ownership-implied peer set. We then ask: *given its peers, how should this stock be valued?* Health Care stocks that trade far below that peer-implied valuation are bought, and those far above it are sold short. The result is a market-neutral 5/5 long/short book, rebalanced quarterly as new 13F filings arrive.
 
 ---
 
 ## 1. The idea
 
-Sophisticated investors price firms using a far richer information set than the handful of accounting ratios and GICS labels analysts typically rely on.
+Institutional investors price firms using a far richer information set than a few accounting ratios and a GICS label. The Asset Embeddings paper shows that **portfolio holdings encode the information relevant for prices**, and that low-dimensional vectors learned from holdings capture firm similarity better than industry classifications.
 
-The Asset Embeddings paper shows — theoretically and empirically — that  **portfolio holdings encode all information relevant for prices** , and that low-dimensional vectors learned from holdings (asset embeddings) capture firm similarity far better than crude industry labels. We apply this to US Health Care, a sector where industry classification is especially misleading: a clinical-stage biotech, a dividend-paying pharma major, a med-tech compounder, and a managed-care payer all sit under "Health Care," yet they are held by entirely different investor clienteles. We learn each firm's embedding from  *who owns it* , **cluster firms into peer groups** by embedding similarity, and then run a short-horizon **mean-reversion** trade *within* each cluster: each day, long the names that lagged their peers and short the names that ran ahead, betting on next-day reversion of the cross-sectional residual.
+Health Care is where this should matter most. A clinical-stage biotech, a dividend-paying pharma major, a med-tech compounder and a hospital operator all sit under "Health Care", yet they are held by very different investor clienteles. Ownership-based peers are sharper comparables. Sharper comparables give a cleaner relative-valuation signal.
 
----
-
-## 2. The thesis
-
-1. **Ownership reveals the real "comparables."** The same investors holding two stocks is
-   a stronger signal of similarity than a similar firm characteristics.
-2. **Better peer groups → cleaner trades.** When a group truly contains look-alike
-   companies, a stock straying from the group is more likely a temporary mispricing than
-   real news — exactly the situation mean reversion profits from.
-3. **It nets out the noise.** Trading *within* a group (long the laggards, short the
-   leaders) cancels out big market- and sector-wide moves, leaving just the relative
-   mispricing we're after.
-4. **Health Care is the perfect test case.** It's the sector where industry labels fail
-   hardest, so smarter grouping should add the most value here.
-
----
-
-## 3. OS-BERT asset embeddings
-
-This is the technical heart of the project. We borrow a tool from language AI.
-
-### The language analogy
-
-Modern AI models (like BERT) understand a word by looking at the words around it — "bank"
-means something different next to "river" than next to "money." We reuse this idea:
-
-- A **stock** is like a **sentence**.
-- Each **investor who owns it** is like a **word** in that sentence.
-
-By training a small BERT-style model to "read" these ownership sentences, we get, for each
-stock, a compact vector (an **embedding**) that captures its ownership profile.
-Stocks with similar embeddings are held by similar investors — i.e. they're true peers.
-We then group (cluster) stocks by these embeddings.
-
-> The official name for this recipe is **OS-BERT** (Ownership-Shares BERT), from Gabaix,
-> Koijen, Richmond & Yogo (2025).
-
-### 3.1 The data — who owns what
-
-Source: quarterly institutional holdings (13F filings) from **FactSet Ownership on WRDS**,
-built by [WUTIS_Data.r](WUTIS_Data.r).
-
-- We take every 13F holding near each quarter-end, across the **whole US market** (all
-  sectors, not just Health Care — see the note below).
-- The "asset" is the **company** (issuer), and we record, for each company each quarter,
-  the list of investors who hold it, **ranked from biggest owner to smallest**.
-- We clean out noise: keep companies held by **≥ 10 investors**, keep investors holding
-  **≥ 10 stocks**, and drop investors who are dangerously concentrated (one position > 70%
-  of their book). This repeats until the set is stable.
-- Coverage: **2005 → 2026**, one snapshot per quarter.
-
-The output is one "ownership sentence" per company per quarter, saved to
-`data_wutis/q_YYYY-MM-DD.parquet`.
-
-> **Why train on the whole market, not just Health Care?** It's more informative to see
-> that a biotech is held mostly by specialist biotech funds *versus* broad index funds —
-> and you only see that contrast against the full investor landscape. So we learn
-> embeddings for *every* stock, and only **narrow down to Health Care when we trade**.
-
-### 3.2 Turning ownership into "sentences"
-
-For each company in a quarter, we line up its investors from largest to smallest stake:
+## 2. Pipeline
 
 ```
-investor_8214, investor_119, investor_4471, ...   (biggest owner → smallest)
+ WRDS: FactSet 13F holdings           WRDS: Compustat, CRSP
+          │                                    │
+          ▼                                    ▼
+ WUTIS_Data.r                         wrds_pull_fundamentals.R ─► fundamentals.parquet
+   └► data_wutis/q_*.parquet          wrds_pull_crsp.R ─────────► prices_crsp2.parquet
+          │                           wrds_pull_gics.R ─────────► gics.parquet
+          ▼                           merge_fundamentals_crsp.R ► fundamentals_merged.parquet
+ OS_BERT_training.py                               │
+   └► embeddings_os/q_*.parquet                    │
+          │                                        │
+          └──────────────────┬─────────────────────┘
+                             ▼
+               RelativeValue_strategy.r ─► valuation_metric.parquet
+                             │              ai_predictions.parquet
+                             │              ridge_oos_results.parquet
+            ┌────────────────┼──────────────────────┐
+            ▼                ▼                      ▼
+   Backtest_trading.r   generate_live_picks_today.r   Regression_visual.r
+   (7Y backtest +       (current 5/5 basket →         (OOS R² over time)
+    tear sheet)          picks_crsp.csv)
 ```
 
-A company can have hundreds of owners, but the model only reads up to **62** at a time, so
-very long lists are split into chunks.
+## 3. Method
 
-### 3.3 Training the model (done once per quarter)
+### 3.1 Ownership "sentences" — [WUTIS_Data.r](Backend/data_pull/WUTIS_Data.r)
 
-Run by [OS_BERT_training.py](OS_BERT_training.py). Each investor ID is treated as a "word."
-Training happens in two stages:
+- **Source:** FactSet 13F holdings on WRDS, quarterly, **2005 Q1 → 2026 Q1**, covering the **whole US market** and not just Health Care. A biotech held mainly by specialist funds only looks distinctive against the full investor landscape.
+- **Asset** = issuer entity (one representative ISIN each). **Token** = investor ID.
+- **Cleaning:**
+  - Drop investors whose largest position exceeds 70% of their book.
+  - Then iteratively keep only investors holding ≥ 10 stocks and stocks held by ≥ 10 investors.
+- **Sequences:** each stock's investors are ordered from largest to smallest ownership share. Lists longer than 62 are split into chunks.
 
-**Stage 1 — learn the language of ownership.** We hide 15% of the investors in each
-company's list and train the model to guess them back from the others (the standard BERT
-"fill in the blank" trick). To predict a missing owner well, the model has to learn which
-investors tend to co-own the same kinds of companies.
+### 3.2 OS-BERT embeddings — [OS_BERT_training.py](Backend/embeddings/OS_BERT_training.py)
 
-**Stage 2 — make similar companies line up.** We split each company's owner list into two
-halves and teach the model that the two halves of the *same* company should look alike,
-while different companies should look different. This makes the final embeddings directly
-comparable by similarity.
+A small BERT model is trained **from scratch each quarter**, with investors playing the role of words:
 
-**The result:** one embedding (a list of 64 numbers) per company per quarter, saved to
-`embeddings_os/q_*.parquet`. Similar numbers ⇒ similar owners ⇒ true peers.
+1. **Masked-language-model pre-training.** 15% of the investors in each sequence are hidden, and the model learns to predict them from the rest. To succeed it must learn which investors co-own similar firms.
+2. **Sentence-transformer fine-tuning.** Each sequence is split into even- and odd-ranked owners, and a contrastive (InfoNCE) loss pulls the two halves of the same stock together. This makes embeddings directly comparable by cosine similarity.
+3. **Extraction.** The embedding is the mean-pooled output over a stock's top-62 owners.
 
-| Setting               | Value             | In plain terms                                |
-| --------------------- | ----------------- | --------------------------------------------- |
-| Embedding size        | 64 numbers        | How detailed each company's "fingerprint" is  |
-| Owners read per stock | 62                | The model's attention span                    |
-| Model size            | 4 layers, 2 heads | A deliberately small, fast model              |
-| Re-trained            | every quarter     | Ownership changes over time, so we refresh it |
+| Setting | Value |
+| --- | --- |
+| Embedding size | 64 |
+| Layers / heads / FFN | 4 / 2 / 256 |
+| Context window | 62 investors |
+| Pre-training | 10 epochs, lr 5e-4, 90/10 issuer-level split |
+| Fine-tuning | 3 epochs, lr 2e-4 |
 
-### 3.4 Proving the peer groups beat GICS
+Training ran on a SLURM GPU cluster ([02_train_os.sh](Backend/embeddings/02_train_os.sh); [01_smoke_test_os.sh](Backend/embeddings/01_smoke_test_os.sh) checks the GPU environment first).
 
-[explore_embeddings.R](explore_embeddings.R) is the **visual and quantitative companion to
-the backtest**. The trade in section 4 lives or dies on one claim — that ownership-based
-peer groups are better than GICS industries for Health Care. This script shows *why* that's
-true, on a single representative quarter, before any trading happens.
+### 3.3 Valuation residual and mispricing — [RelativeValue_strategy.r](Strategy/RelativeValue_strategy.r)
 
-It deliberately mirrors the strategy: it clusters the embeddings **within Health Care** into
-the **same 8 groups** the backtest uses (`K` matched to `N_CLUSTERS`), then puts those
-embedding clusters head-to-head with the official **GICS Health Care sub-industries**
-(Biotechnology, Pharmaceuticals, HC Equipment & Supplies, HC Providers & Services, HC
-Technology, Life Sciences Tools).
+Following Section 4.1 of the paper, for each quarter *t*:
 
-What it produces:
+1. **Strip out what book equity explains.** A cross-sectional regression, with both sides winsorised at 1%:
 
-- **A "how clean are the groups?" score** (cosine *silhouette*) for three groupings, all
-  measured in the same embedding space: the **embedding clusters**, the **GICS industries**,
-  and a **random placebo** as a sanity floor. Higher = tighter, more self-similar groups.
-- **A similarity score between the two groupings** (the *adjusted Rand index*). A **low**
-  value means the embeddings carve Health Care up **differently** from
-  GICS: they find structure the industry labels miss.
-- **A cluster × GICS composition table** (`cluster_gics_composition_*.csv`) showing what mix
-  of GICS industries sits inside each embedding cluster — i.e. exactly where clusters merge
-  or cut across the standard buckets.
-- **Two side-by-side 2D maps** of the same Health Care firms (UMAP, with t-SNE / PCA
-  fallbacks): one coloured by **embedding cluster** (`hc_clusters_embedding_*.png`), one by
-  **GICS industry** (`hc_clusters_gics_*.png`). Seeing the two colourings *not* line up is
-  the argument, made visually.
-- **A nearest-neighbour tour**: for the most representative firm in each cluster, its closest
-  look-alikes by ownership, each tagged with its GICS industry. The headline artifact is that
-  a firm's true peers often **span several GICS industries** — exactly the cross-industry
-  grouping GICS can't produce.
+   $$\log ME_{at} = \gamma_t \log BE_{at} + \alpha_t + p^{\perp}_{at}$$
 
-Everything lands in `exhibits/`: the two PNG maps, `hc_clusters_*.parquet` (cluster
-assignments + map coordinates per firm), and the composition CSV. Point `EMB_FILE` at the
-same quarter the strategy trades; it needs `finratio.parquet` and `gics.parquet` present (so
-run the WRDS pulls in section 4 first).
+   The residual $p^{\perp}_{at}$ is the part of a stock's valuation that book equity cannot explain.
 
----
+2. **Predict $p^{\perp}$ from ownership peers.** A ridge regression on the L2-normalised embeddings, $p^{\perp}_{at} = \beta_t' x_{at} + \delta_t + \epsilon_{at}$. It uses **5-fold cross-fitting at the firm level**, so every stock's prediction comes from a model that never saw it.
 
-## 4. The trade — buy the laggards, short the leaders
+3. **Signal:**
 
-Run by [healthcare_statarb.R](healthcare_statarb.R). Putting it all together:
+   $$\text{Mispricing}_{at} = p^{\perp}_{at} - \widehat{p^{\perp}_{at}}$$
 
-1. **Group.** Use last quarter's embeddings to sort stocks into **8 peer clusters**
-   (we wait 45 days after quarter-end, because 13F filings are public with a lag).
-2. **Restrict to Health Care.** We only ever hold Health Care names.
-3. **Score.** Within each cluster, measure how far each stock's return sits
-   from its cluster's average.
-4. **Trade.** Buy the biggest laggards, short the biggest leaders, in equal dollar amounts
-   (so the book is market-neutral). Bet on reversion.
-5. **Be honest about costs.** Trading daily racks up turnover, so we subtract realistic
-   trading costs (5 bps per unit traded). The **after-cost** number is the one that counts.
+   Negative means cheap relative to ownership peers. Positive means rich.
 
-**The crucial comparison:** we then run the *identical* strategy but group stocks by
-**GICS industry** instead of embeddings. The pitch succeeds if the embedding version earns
-a higher after-cost Sharpe ratio than the GICS version.
+The script also computes the pooled out-of-sample R² of the ridge step. [Regression_visual.r](Strategy/Regression_visual.r) plots it over time.
 
-Results are written to `results/` (`statarb_daily.parquet`, `statarb_summary.csv`) and the
-script prints a side-by-side Embedding-vs-GICS scorecard.
+Inputs:
+- The universe is every US stock (US ISIN) that has an embedding in that quarter.
+- Fundamentals come from Compustat quarterly (`fundq`) and are **lagged one quarter** to avoid look-ahead.
+- Market equity comes from CRSP via the CCM link table.
+- A liquidity screen keeps the largest names by market cap each quarter (`LIQ_PCT`).
 
-### Supporting market data
+### 3.4 Trading rule — [Backtest_trading.r](Strategy/Backtest_trading.r)
 
-The backtest also needs prices and a way to identify each company. Three small WRDS pulls
-provide that:
+- **Universe:** Health Care only (GICS sector 35, from Compustat `comp.company`).
+- **Portfolio:** equal-weight, dollar-neutral. **Long the 5 most negative mispricings, short the 5 most positive.**
+- **Rebalancing:** quarterly, as new 13F filings regenerate the embeddings.
+- **Evaluation window:** the last 7 years (2019–2026). The script prints total gain, annualised return and volatility, Sharpe, Sortino, max drawdown and quarterly win rate.
 
-| Script                                    | What it grabs                    | Why we need it                    |
-| ----------------------------------------- | -------------------------------- | --------------------------------- |
-| [wrds_pull_crsp.R](wrds_pull_crsp.R)         | Daily stock returns (CRSP)       | The actual returns we trade on    |
-| [wrds_pull_finratio.R](wrds_pull_finratio.R) | A CUSIP → company-key bridge    | Links prices to the right company |
-| [wrds_pull_gics.R](wrds_pull_gics.R)         | GICS industry labels (Compustat) | The benchmark we test against     |
+### 3.5 Current picks — [generate_live_picks_today.r](Strategy/generate_live_picks_today.r)
 
-(All three are matched together on the 8-character CUSIP, the common ID across sources.)
+The same model is applied to the latest embedding quarter (2025-12-31):
+- **Universe:** US Health Care, top 50% by CRSP market cap.
+- **Output:** the 5 cheapest and 5 richest names are written to `picks_crsp.csv`.
 
----
+## 4. Results presented in the pitch
 
-## 5. The whole pipeline at a glance
+Out-of-sample backtest, 2019–2026, **gross of costs**:
+
+| Metric | Value |
+| --- | --- |
+| Total cumulative gain | 4.15× |
+| Annualised return | 22.57% |
+| Sortino ratio | 2.87 |
+| Win rate (quarterly) | 69.0% |
+
+Basket at the time of the pitch (embeddings as of 2025-12-31):
+
+| Long (ownership-cheap) | Short (ownership-rich) |
+| --- | --- |
+| Fresenius Medical Care (FMS) | DaVita (DVA) |
+| Smith & Nephew (SNN) | Brookdale Senior Living (BKD) |
+| Community Health Systems (CYH) | Amneal Pharmaceuticals (AMRX) |
+| Genmab (GMAB) | HCA Healthcare (HCA) |
+| Azenta (AZTA) | McKesson (MCK) |
+
+### Limitations
+
+- **Returns are a proxy.** Backtest returns are quarter-over-quarter changes in market equity. That approximates price return, but it also picks up share issuance and buybacks and ignores dividends. It is not a CRSP total-return series.
+- **No trading costs.** Transaction and borrow costs are not modelled. Short positions in small Health Care names can be expensive to borrow.
+- **Live picks use an in-sample fit.** The ridge in the live-picks script is fitted on the same cross-section it scores. The backtest uses cross-fitted predictions.
+- **GICS labels are static.** Each firm's current Compustat GICS label is applied to all history. This is survivorship-free in coverage but not point-in-time.
+- **Clustering not included.** The embedding-cluster visualisation shown in the pitch (spherical k-means on the embeddings) is not part of this repository.
+
+## 5. Repository layout
 
 ```
-WRDS / FactSet 13F holdings
-        │
-        ▼
-  WUTIS_Data.r          ──►  "ownership sentences"     data_wutis/q_*.parquet
-        │
-        ▼
-  OS_BERT_training.py   ──►  company embeddings        embeddings_os/q_*.parquet
-        │
-        ├──►  explore_embeddings.R   ──►  cluster maps & checks   exhibits/
-        │
-        ▼
-  healthcare_statarb.R  ──►  the backtest + GICS benchmark        results/
-        ▲
-        │   needs:  prices_crsp2.parquet · finratio.parquet · gics.parquet
-        └── from:   wrds_pull_crsp.R · wrds_pull_finratio.R · wrds_pull_gics.R
+Backend/
+  data_pull/
+    WUTIS_Data.r                 13F holdings → ownership sequences
+    wrds_pull_fundamentals.R     Compustat book equity, earnings, market value
+    wrds_pull_crsp.R             CRSP daily stock file (returns, market cap)
+    wrds_pull_gics.R             GICS sector per gvkey
+    merge_fundamentals_crsp.R    CCM link: Compustat ↔ CRSP market equity
+  embeddings/
+    OS_BERT_training.py          OS-BERT training + embedding extraction
+    01_smoke_test_os.sh          SLURM GPU sanity check
+    02_train_os.sh               SLURM training job
+    requirements.txt             Python dependencies
+Strategy/
+  RelativeValue_strategy.r       p⊥, cross-fitted ridge, mispricing signal
+  Backtest_trading.r             Health Care 5/5 long/short backtest
+  generate_live_picks_today.r    Current basket from the latest embeddings
+  Regression_visual.r            Out-of-sample R² chart
 ```
 
----
+**No data is included.** Every data file is derived from licensed WRDS sources (FactSet, Compustat, CRSP) and is excluded via `.gitignore`: holdings sequences, embeddings, fundamentals, prices and predictions. You need your own WRDS access to reproduce the results.
 
-## 6. What's in this folder
+## 6. How to run
 
-| File                                                                                                            | What it does                                                                 |
-| --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| [WUTIS_Data.r](WUTIS_Data.r)                                                                                       | Builds ownership sentences from 13F holdings →`data_wutis/`               |
-| [OS_BERT_training.py](OS_BERT_training.py)                                                                         | Trains OS-BERT, produces embeddings →`embeddings_os/`, `models_os/`     |
-| [explore_embeddings.R](explore_embeddings.R)                                                                       | Validates HC peer groups vs GICS — maps, scores, neighbours →`exhibits/` |
-| [healthcare_statarb.R](healthcare_statarb.R)                                                                       | The trading strategy + GICS comparison →`results/`                        |
-| [wrds_pull_crsp.R](wrds_pull_crsp.R), [wrds_pull_finratio.R](wrds_pull_finratio.R), [wrds_pull_gics.R](wrds_pull_gics.R) | Pull prices, IDs, and industry labels                                        |
-| [01_smoke_test_os.sh](01_smoke_test_os.sh), [02_train_os.sh](02_train_os.sh)                                          | Run the training on a GPU cluster                                            |
-| [requirements.txt](requirements.txt)                                                                               | Python dependencies                                                          |
-| `data_wutis/`, `embeddings_os/`, `*.parquet`                                                              | Data files (large, kept out of git)                                          |
+All scripts read and write their data files by bare filename, so **run everything from the repository root**.
 
----
-
-## 7. How to run it yourself
-
-**1. Add your WRDS login** to a file called `.Renviron` (kept private, not committed):
+**1. WRDS credentials.** Put these in `.Renviron` in the repo root (git-ignored):
 
 ```
 WRDS_USER=your_user
 WRDS_PASSWORD=your_password
 ```
 
-**2. Pull the data** (R):
-
-```r
-Rscript WUTIS_Data.r          # ownership sentences  -> data_wutis/
-Rscript wrds_pull_crsp.R      # daily returns        -> prices_crsp2.parquet
-Rscript wrds_pull_finratio.R  # ID bridge            -> finratio.parquet
-Rscript wrds_pull_gics.R      # industry labels      -> gics.parquet
-```
-
-**3. Train the embeddings** (Python):
+**2. Pull data (R).** Required packages: `tidyverse`, `arrow`, `lubridate`, `dbplyr`, `RPostgres`, `glmnet`, `scales`.
 
 ```bash
-pip install -r requirements.txt
-python OS_BERT_training.py            # all quarters
-python OS_BERT_training.py --test     # quick 2-quarter trial
-# on a GPU cluster:  sbatch 02_train_os.sh
+Rscript Backend/data_pull/WUTIS_Data.r                # → data_wutis/
+Rscript Backend/data_pull/wrds_pull_fundamentals.R    # → fundamentals.parquet
+Rscript Backend/data_pull/wrds_pull_crsp.R            # → prices_crsp2.parquet (large)
+Rscript Backend/data_pull/wrds_pull_gics.R            # → gics.parquet
+Rscript Backend/data_pull/merge_fundamentals_crsp.R   # → fundamentals_merged.parquet
 ```
 
-**4. Explore and trade** (R):
+**3. Train embeddings (Python, GPU recommended).**
 
-```r
-Rscript explore_embeddings.R   # cluster maps & sanity checks -> exhibits/
-Rscript healthcare_statarb.R   # the backtest + GICS benchmark -> results/
+```bash
+pip install -r Backend/embeddings/requirements.txt
+python Backend/embeddings/OS_BERT_training.py          # all quarters → embeddings_os/
+python Backend/embeddings/OS_BERT_training.py --test   # quick trial on data_wutis/test/
 ```
 
----
+**4. Build the signal, backtest and picks (R).**
+
+```bash
+Rscript Strategy/RelativeValue_strategy.r       # → ai_predictions.parquet
+Rscript Strategy/Backtest_trading.r             # tear sheet + equity curve
+Rscript Strategy/generate_live_picks_today.r    # → picks_crsp.csv
+Rscript Strategy/Regression_visual.r            # OOS R² chart
+```
+
+## Team
+
+Elias Söser (Team Lead) · Isabelle Afkhampour · Jacopo Mei (Model Development) · Florian Wimmer · Viktoriia Yasinska
 
 ## References
 
-Gabaix, X., Koijen, R. S. J., Richmond, R. J., & Yogo, M. (2025). *Asset Embeddings.*
-Working paper — the source of the OS-BERT method.
-
-Supporting: Devlin et al. (2019), *BERT*; Reimers & Gurevych (2019), *Sentence-BERT*;
-Koijen & Yogo (2019), *A Demand System Approach to Asset Pricing*; Jensen, Kelly & Pedersen
-(2023), firm characteristics and returns.
+- Gabaix, X., Koijen, R. S. J., Richmond, R. J., & Yogo, M. (2025). *Asset Embeddings.* Working paper.
+- Devlin, J. et al. (2019). *BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding.*
+- Reimers, N., & Gurevych, I. (2019). *Sentence-BERT.*
+- Koijen, R. S. J., & Yogo, M. (2019). *A Demand System Approach to Asset Pricing.*
 
 ---
 
-*Prepared by WUTIS — WU Trading & Investment Society.*
+*For educational purposes only. Nothing in this repository is investment advice. Past performance, including backtested performance, is not indicative of future results.*

@@ -36,6 +36,7 @@ credentials.json
 data/
 *.csv
 *.parquet
+*.parquet.as.json
 *.feather
 *.h5
 *.pkl
@@ -49,6 +50,26 @@ models/
 wandb/
 runs/
 logs/
+
+# Licensed-data derivatives (WRDS / FactSet / CRSP / Bloomberg) — never publish
+data_wutis/
+embeddings_os/
+models_os/
+cache/
+*.xlsx
+*.xls
+
+# Generated outputs & old experiments
+*.png
+exhibits/
+results/
+results_old/
+results_live/
+results_momentum/
+
+# Confidential pitch material (WUTIS disclaimer: no distribution without consent)
+*.pdf
+*.pptx
 
 # OS / editor
 .DS_Store
