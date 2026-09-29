@@ -78,11 +78,11 @@ Following Section 4.1 of the paper, for each quarter *t*:
 
    The residual $p^{\perp}_{at}$ is the part of a stock's valuation that book equity cannot explain.
 
-2. **Predict $p^{\perp}$ from ownership peers.** A ridge regression on the L2-normalised embeddings, $p^{\perp}_{at} = \beta_t'x_{at} + \delta_t + \epsilon_{at}$. It uses **5-fold cross-fitting at the firm level**, so every stock's prediction comes from a model that never saw it.
+2. **Predict $p^{\perp}$ from ownership peers.** A ridge regression on the L2-normalised embeddings, $p^{\perp}_ {at} = \beta_ t'x_ {at} + \delta_ t + \epsilon_ {at}$. It uses **5-fold cross-fitting at the firm level**, so every stock's prediction comes from a model that never saw it.
 
 4. **Signal:**
 
-   $$\widehat{p^{\perp}_{at}}$$
+   $$\text{Mispricing}_ {at} = p^{\perp}_ {at} - \widehat{p^{\perp}_{at}}$$
 
    Negative means cheap relative to ownership peers. Positive means rich.
 
