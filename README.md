@@ -82,7 +82,7 @@ Following Section 4.1 of the paper, for each quarter *t*:
 
 4. **Signal:**
 
-   $$\text{Mispricing}_{at} = p^{\perp}_{at} - \widehat{p^{\perp}_{at}}$$
+   $$\widehat{p^{\perp}_{at}}$$
 
    Negative means cheap relative to ownership peers. Positive means rich.
 
